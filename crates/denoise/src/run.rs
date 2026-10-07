@@ -106,44 +106,70 @@ pub fn denoise_bayer(
     let group = p.parallel.max(1);
     let mut done = 0;
     // where the time goes, printed under `LIGHTCRAFT_PROFILE`
-    let (mut t_model, mut t_blend) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
-    for chunk in tiles.chunks(group) {
-        let started = std::time::Instant::now();
-        if ctl.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-            return Err(Error::Cancelled);
-        }
-        // run the model on this group of tiles together, keep their order
-        let outs: Vec<Result<(Vec<f32>, Vec<f32>), Error>> = chunk
+    let (mut t_wait, mut t_total) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let began = std::time::Instant::now();
+
+    // One group of tiles at a time: pack, run the model, check and bring each to the input's scale, in parallel.
+    // Blending (sequential: the tiles add into one picture, in tile order so the result does not depend on timing) of
+    // the previous group runs while the next group is on the model, so neither the card nor the cores wait for it.
+    type Tile = (usize, usize, bool, bool, bool, bool);
+    let compute = |chunk: &[Tile]| -> Vec<Result<Vec<f32>, Error>> {
+        chunk
             .par_iter()
-            .map(|&(x0, y0, _, _, _, _)| {
+            .map(|&(x0, y0, bx, ax, by, ay)| {
                 let mut input = vec![0f32; 4 * p.tile * p.tile];
                 if !pack_tile(mosaic, width, height, layout, x0 as isize, y0 as isize, p.tile, &mut input) {
                     return Err(Error::Input("a tile could not be packed".into()));
                 }
-                let out = runner.run(&input)?;
-                Ok((input, out))
+                let mut out = runner.run(&input)?;
+                let side = 2 * p.tile;
+                if out.len() != 3 * side * side {
+                    return Err(Error::Model(format!("{} numbers for a tile, not the {} expected", out.len(), 3 * side * side)));
+                }
+                if out.iter().any(|v| !v.is_finite()) {
+                    return Err(Error::Model("numbers that are not finite".into()));
+                }
+                finish_tile(&input, &mut out, p, (bx, ax, by, ay));
+                Ok(out)
             })
-            .collect();
-        t_model += started.elapsed();
-        let started = std::time::Instant::now();
+            .collect()
+    };
+    let mut blend = |chunk: &[Tile], outs: Vec<Result<Vec<f32>, Error>>| -> Result<(), Error> {
         for (&(x0, y0, bx, ax, by, ay), r) in chunk.iter().zip(outs) {
-            let (input, mut out) = r?;
-            let side = 2 * p.tile;
-            if out.len() != 3 * side * side {
-                return Err(Error::Model(format!("{} numbers for a tile, not the {} expected", out.len(), 3 * side * side)));
-            }
-            if out.iter().any(|v| !v.is_finite()) {
-                return Err(Error::Model("numbers that are not finite".into()));
-            }
-            finish_tile(&input, &mut out, p, (bx, ax, by, ay));
-            blend_tile(&out, &input, &mut acc, &mut wsum, (width, height), (nx, ny), layout, (x0, y0), p, (bx, ax, by, ay));
+            blend_tile(&r?, &mut acc, &mut wsum, (width, height), (nx, ny), layout, (x0, y0), p, (bx, ax, by, ay));
             done += 1;
             if let Some(f) = ctl.progress {
                 f(done, total);
             }
         }
-        t_blend += started.elapsed();
+        Ok(())
+    };
+    let mut previous: Option<(&[Tile], Vec<Result<Vec<f32>, Error>>)> = None;
+    for chunk in tiles.chunks(group) {
+        if ctl.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(Error::Cancelled);
+        }
+        let (outs, blended) = rayon::join(
+            || compute(chunk),
+            || match previous.take() {
+                Some((c, o)) => {
+                    let started = std::time::Instant::now();
+                    let r = blend(c, o);
+                    (r, started.elapsed())
+                }
+                None => (Ok(()), std::time::Duration::ZERO),
+            },
+        );
+        blended.0?;
+        t_wait += blended.1;
+        previous = Some((chunk, outs));
     }
+    if let Some((c, o)) = previous.take() {
+        let started = std::time::Instant::now();
+        blend(c, o)?;
+        t_wait += started.elapsed();
+    }
+    t_total += began.elapsed();
     let started = std::time::Instant::now();
     // normalise by the weights
     let (ox, oy) = (layout.position(0, 0).0, layout.position(0, 0).1);
@@ -159,10 +185,10 @@ pub fn denoise_bayer(
     });
     if std::env::var_os("LIGHTCRAFT_PROFILE").is_some() {
         eprintln!(
-            "[denoise] {total} tiles, {} at once: pack + model {:.0} ms, finish + blend {:.0} ms (one thread), normalise {:.0} ms",
+            "[denoise] {total} tiles, {} at once: tiles {:.0} ms (blending, {:.0} ms of it, overlaps the model), normalise {:.0} ms",
             group,
-            t_model.as_secs_f64() * 1e3,
-            t_blend.as_secs_f64() * 1e3,
+            t_total.as_secs_f64() * 1e3,
+            t_wait.as_secs_f64() * 1e3,
             started.elapsed().as_secs_f64() * 1e3
         );
     }
@@ -264,7 +290,6 @@ fn protect_clipped(input: &[f32], out: &mut [f32], t: usize, clip: f32) {
 #[allow(clippy::too_many_arguments)]
 fn blend_tile(
     out: &[f32],
-    _input: &[f32],
     acc: &mut [[f32; 3]],
     wsum: &mut [f32],
     size: (usize, usize),
@@ -378,6 +403,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_picture_does_not_depend_on_how_many_tiles_run_at_once_or_how_long_each_takes() {
+        // tiles that finish in a different order every time: blending still adds them in tile order
+        struct Jittery(Mock);
+        impl TileRunner for Jittery {
+            fn run(&self, input: &[f32]) -> Result<Vec<f32>, Error> {
+                let wait = (input.iter().take(64).sum::<f32>() * 1000.0) as u64 % 7;
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+                self.0.run(input)
+            }
+        }
+        let layout = Layout { dx: 0, dy: 1 };
+        let (w, h) = (150usize, 110usize);
+        let m = mosaic(w, h, [1, 0, 2, 1]);
+        let run = |parallel: usize| {
+            let mut p = params(32, 8, Gain::MatchMean { nominal: 1.0e6, max_deviation: 0.05 });
+            p.parallel = parallel;
+            denoise_bayer(&m, w, h, layout, &Jittery(Mock { tile: 32, scale: 1.01e6 }), &p, &Control::default()).unwrap()
+        };
+        let one = run(1);
+        for parallel in [2, 3, 8] {
+            assert_eq!(run(parallel).data, one.data, "{parallel} at once");
+        }
+    }
+
+    #[test]
+    fn a_failing_tile_or_a_cancel_ends_the_picture_without_a_panic() {
+        struct Fails(Mock, std::sync::atomic::AtomicUsize);
+        impl TileRunner for Fails {
+            fn run(&self, input: &[f32]) -> Result<Vec<f32>, Error> {
+                if self.1.fetch_add(1, Ordering::Relaxed) == 4 {
+                    return Err(Error::Runtime("boom".into()));
+                }
+                self.0.run(input)
+            }
+        }
+        let layout = Layout { dx: 0, dy: 0 };
+        let (w, h) = (150usize, 110usize);
+        let m = mosaic(w, h, [0, 1, 1, 2]);
+        let r = denoise_bayer(
+            &m,
+            w,
+            h,
+            layout,
+            &Fails(Mock { tile: 32, scale: 1.0 }, Default::default()),
+            &params(32, 8, Gain::None),
+            &Control::default(),
+        );
+        assert!(matches!(r, Err(Error::Runtime(_))), "{r:?}");
+        let stop = AtomicBool::new(true);
+        let ctl = Control { cancel: Some(&stop), progress: None };
+        let r = denoise_bayer(&m, w, h, layout, &Mock { tile: 32, scale: 1.0 }, &params(32, 8, Gain::None), &ctl);
+        assert!(matches!(r, Err(Error::Cancelled)));
     }
 
     #[test]
