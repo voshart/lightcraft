@@ -9,7 +9,7 @@ your library or next to your originals. Your raw file is never changed and no DN
 
 ## How it works without creating files
 
-A neural denoiser is slow (about ten seconds a photo here), so its result cannot be computed for every slider tick.
+A neural denoiser is slow (several seconds a photo even on a fast machine), so its result cannot be computed for every slider tick.
 LightCraft separates the two jobs:
 
 - **The Amount is a develop setting.** It lives in the photo's edits like any slider: history, copy and paste, presets,
@@ -97,18 +97,46 @@ per strip, and read back in the window and at the binned size the pipeline's pre
 full-size export line up with the plain picture to the pixel.
 
 Measured with the real model on five CC0 raws from `corpus/raw` (one Pentax K-3, one Nikon D5100, one Canon 6D, one Sony
-a7 III, one Pixel 2 XL DNG), 32 cores, release build, `cargo test --features denoise --test denoise_real -- --ignored`:
+a7 III, one Pixel 2 XL DNG), Ryzen 9 7945HX (16 cores / 32 threads), release build, `cargo test --release --features denoise --test denoise_real -- --ignored`:
 
 | | |
 |---|---|
-| Time to make a picture | 8–15 s for 12–24 MP at full pace, in the background |
+| Time to make a picture, start to finish | 5–9 s for 12–24 MP at full pace (a 24 MP Sony ARW 9 s, a 12 MP Pixel DNG 5 s), in the background |
 | Fine-detail roughness at Amount 100 (mean absolute second difference of the luma, 1600 px preview) | 4–26 % lower than the plain picture, by file |
 | Cache size per photo | 41–68 MB |
-| Memory | about 1.9 GB peak working set for the whole test process (one file each, a 24 MP Sony and a 12 MP Pixel: making the picture, two renders and an export) |
+| Memory | about 1.9 GB peak working set (release build) for the whole test process (one file each, a 24 MP Sony and a 12 MP Pixel: making the picture, two renders and an export) |
 | Fuji X-Trans | reported as "not supported", cleanly, in 0.3 s |
 
 Those are *measurements of whether it works* — a lower roughness is not proof it looks better. There is no side-by-side
 comparison against Lightroom's AI Denoise yet (see *Render fidelity* in the roadmap).
+
+### Why it takes that long, and what a smaller machine gets
+
+The model is a U-Net run over 512 × 512-cell tiles (1 MP each) that overlap by 64 cells, so a 24 MP photo is 35 tiles and a
+12 MP photo about 15. One tile costs about 1.4 s on one core of the test machine (an AMD Ryzen 9 7945HX, 16 cores / 32 threads, a high-end laptop chip), so the whole
+photo is roughly 50 s of CPU work, and the question is how many cores share it. The model stage alone, on the 24 MP Sony
+(release build, `LC_DENOISE_PARALLEL=n`):
+
+| Tiles run at once | 1 | 4 | 8 | 16 | 32 |
+|---|---:|---:|---:|---:|---:|
+| Seconds | 50 | 15 | 9.8 | 7.4 | 6.7 |
+
+It stops improving past about 16 because the test machine has 16 physical cores (the other 16 threads are their
+hyper-thread siblings) and because 35 tiles split unevenly into waves. Reading and decoding the raw and writing the
+picture add about 2 s, which makes the 9 s above. The same run in the repository's default *dev* build is about 40 %
+slower (10.6 s at 16), so a debug-ish build is not what to time.
+
+What that means elsewhere (estimates from the table, not measurements on those machines):
+
+- **While you are working in the window** the queue runs two tiles at once (pace `light`), so a 24 MP photo takes
+  about 30 s. Nothing blocks: the loupe keeps showing the normal picture, with a progress bar under the slider.
+- **A typical 8-thread laptop** at its `normal` pace (4 tiles at once) would be in the 15–30 s range per 24 MP photo,
+  depending on how fast its cores are. A slow or old CPU could take a minute or more.
+- **It is paid once per photo and model.** The picture is cached, so moving the slider, reopening the photo and the
+  second export are instant; only changing the file or the model repeats it.
+- **Still slow compared with what people expect from a slider.** Waiting seconds for a photo's first clean picture is
+  the cost of running a neural network on a CPU. Real improvements would be a GPU path or a smaller / quantised model;
+  neither is built, and the only model offered here is the 31 MB RawNIND one.
 
 ## Making pictures
 
@@ -137,8 +165,9 @@ and the web build) has no runner: the commands say so and the slider stays out o
 
 - **Bayer raws only.** X-Trans (Fujifilm), Foveon, already demosaiced DNGs and non-raw photos keep their normal noise
   reduction. A *linear* (demosaiced RGB) model would cover those and DNGs from phones; the contract does not have it yet.
-- **CPU only.** tract is single-threaded per tile; the pipeline parallelises across tiles. A GPU path would turn ten
-  seconds into one or two.
+- **CPU only, and CPU-bound.** The model does about 1.4 s of work per 1-megapixel tile on one core, and a 24 MP photo is 35
+  tiles. It runs as fast as the cores allow (table above), but a GPU path is where a real speed-up would come from (not
+  measured; not built).
 - **No quality comparison** against Lightroom, and no tuning of the blend for dark or clipped areas beyond keeping clipped
   highlights.
 - **The weights are GPL-3.0** (above), and RawNIND was trained on a limited set of sensors.
