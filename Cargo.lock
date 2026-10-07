@@ -5744,6 +5744,7 @@ dependencies = [
  "brotli",
  "flate2",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
