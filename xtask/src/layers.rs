@@ -43,6 +43,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("meta", Class::Layer(1)),
     ("develop", Class::Layer(1)),
     ("faces", Class::Layer(1)),
+    ("denoise", Class::Layer(1)),
     ("scenes", Class::Layer(1)),
     ("pipeline", Class::Layer(2)),
     ("gpu", Class::Layer(3)),
@@ -72,6 +73,8 @@ pub const INTRA_LAYER_ORDER: &[&[&str]] = &[
     &["meta", "develop"],
     &["develop", "scenes"],
     &["codecs", "raw"],
+    // denoise models share the face models' licence and id rules
+    &["faces", "denoise"],
 ];
 
 fn intra_layer_allowed(from: &str, to: &str) -> bool {

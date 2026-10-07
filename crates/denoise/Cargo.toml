@@ -1,0 +1,28 @@
+[package]
+name = "lightcraft-denoise"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightCraft AI denoise (L1): denoise-model manifests, Bayer packing, tiling and blending, the cache file, and a tract runtime"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Run denoise models on the CPU with tract (Rust; its build assembles hand-written speed kernels, see docs/denoise.md).
+tract = ["dep:tract-onnx"]
+
+[dependencies]
+lightcraft-faces = { workspace = true }
+lightcraft-raster = { workspace = true }
+tract-onnx = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+miniz_oxide = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
