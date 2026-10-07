@@ -768,8 +768,12 @@ mod tests {
                 fail: RefCell::new(Vec::new()),
             }
         }
+        /// The model volume spells paths with `/`; the code under test joins them with the host's separator.
+        fn norm(p: &Path) -> String {
+            p.to_string_lossy().replace('\\', "/")
+        }
         fn idx(&self, p: &Path) -> Option<usize> {
-            let p = p.to_string_lossy();
+            let p = Self::norm(p);
             self.files.borrow().iter().position(|(f, _)| if self.ci { f.to_lowercase() == p.to_lowercase() } else { *f == p })
         }
         /// The listing: (exact path, contents), sorted.
@@ -791,14 +795,14 @@ mod tests {
             self.idx(a).is_some() && self.idx(a) == self.idx(b)
         }
         fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
-            if self.fail.borrow().iter().any(|f| a.to_string_lossy().contains(f.as_str())) {
+            if self.fail.borrow().iter().any(|f| Self::norm(a).contains(f.as_str())) {
                 return Err(std::io::Error::other("injected failure"));
             }
             if self.exists(b) {
                 return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "exists"));
             }
             let i = self.idx(a).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))?;
-            self.files.borrow_mut()[i].0 = b.to_string_lossy().to_string();
+            self.files.borrow_mut()[i].0 = Self::norm(b);
             Ok(())
         }
         fn copy_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
@@ -807,7 +811,7 @@ mod tests {
             }
             let i = self.idx(a).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))?;
             let c = self.files.borrow()[i].1.clone();
-            self.files.borrow_mut().push((b.to_string_lossy().to_string(), c));
+            self.files.borrow_mut().push((Self::norm(b), c));
             Ok(())
         }
         fn remove_file(&self, p: &Path) -> std::io::Result<()> {
@@ -816,17 +820,19 @@ mod tests {
             Ok(())
         }
         fn stem_sibling(&self, sidecar: &Path) -> Option<String> {
-            let stem = sidecar.with_extension("").to_string_lossy().to_string();
+            let stem = Self::norm(&sidecar.with_extension(""));
             self.files.borrow().iter().map(|(f, _)| f.clone()).find(|f| {
                 let p = Path::new(f);
-                p.with_extension("").to_string_lossy() == stem && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+                Self::norm(&p.with_extension("")) == stem && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
             })
         }
     }
 
     fn file_photo(id: u64, path: &str) -> Photo {
         let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        Photo::new(PhotoId(id), Source::File { path: path.into() }, &name, "JPG", 1, 1, "2026-01-01T00:00:00")
+        // the host's separator, so `dir.join(name)` in the planner spells the same path the same way
+        let path = path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        Photo::new(PhotoId(id), Source::File { path }, &name, "JPG", 1, 1, "2026-01-01T00:00:00")
     }
 
     /// Issue #95: a case-only rename is a real change on a case-insensitive volume and never
@@ -884,7 +890,7 @@ mod tests {
         let plans = s.plan_rename_with(&fs, &ids, "Trip-{seq}", 1);
         // c can't be renamed (the share went away), and neither can Trip-1 be moved back
         fs.fail.borrow_mut().extend(["c.jpg".to_string(), "Trip-1".to_string()]);
-        let err = s.apply_rename_with(&fs, &plans).unwrap_err().to_string();
+        let err = s.apply_rename_with(&fs, &plans).unwrap_err().to_string().replace('\\', "/");
         assert!(err.contains("rename /p/c.jpg"), "{err}");
         assert!(err.contains("/p/Trip-1.jpg could not be moved back"), "{err}");
         assert!(err.contains("/p/a.jpg → /p/Trip-1.jpg"), "lists what stayed renamed: {err}");
@@ -899,7 +905,7 @@ mod tests {
         );
         // the catalog matches the disk
         let path = |s: &Session, id: u64| match &s.catalog.photo(PhotoId(id)).unwrap().source {
-            Source::File { path } => path.clone(),
+            Source::File { path } => path.replace('\\', "/"),
             Source::Demo { .. } => String::new(),
         };
         assert_eq!(path(&s, 1), "/p/Trip-1.jpg");
@@ -913,7 +919,7 @@ mod tests {
         fs.fail.borrow_mut().extend(["d.jpg.xmp".to_string(), "/p/e.jpg".to_string()]);
         let e = move_file_with(&fs, "/p/d.jpg", "/p/e.jpg").unwrap_err();
         assert!(e.moved, "{e}");
-        assert!(e.message.contains("it is now /p/e.jpg with its sidecar /p/e.xmp"), "{e}");
+        assert!(e.message.replace('\\', "/").contains("it is now /p/e.jpg with its sidecar /p/e.xmp"), "{e}");
         assert_eq!(fs.listing(), vec![("/p/d.jpg.xmp".into(), "Df".into()), ("/p/e.jpg".into(), "D".into()), ("/p/e.xmp".into(), "Ds".into())]);
         // … and when the file does go back, its sidecars follow it
         let fs = FakeFs::new(false, &[("/p/d.jpg", "D"), ("/p/d.xmp", "Ds"), ("/p/d.jpg.xmp", "Df")]);

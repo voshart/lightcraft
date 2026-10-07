@@ -366,15 +366,23 @@ fn local_folder_tree_expands_and_browses() {
     std::fs::create_dir_all(base.join(".hidden")).unwrap();
     let mut h = detail("panel.edit");
     exec(&mut h, "view.leftPanel", json!({"show": true}));
+    h.hide_home_above(&base);
     exec(&mut h, "library.browse", json!({"path": base.to_string_lossy()}));
     h.settle(SETTLE);
     let base_s = base.to_string_lossy().to_string();
     let r = h.request("ui.clickWidget", json!({"id": format!("folderToggle:{base_s}")}), T);
     assert_eq!(r["ok"], true, "{r}");
-    for _ in 0..3 {
-        h.step();
-    }
     let trip = base.join("Trip").to_string_lossy().to_string();
+    // the subfolders are listed on a worker thread: wait for the row, longer on a busy machine
+    let listed = std::time::Instant::now();
+    while listed.elapsed() < Duration::from_secs(20) {
+        h.step();
+        let w = h.request("ui.widgets", json!({"filter": format!("source:local:{trip}")}), T);
+        if w["result"].as_array().is_some_and(|a| !a.is_empty()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let r = h.request("ui.clickWidget", json!({"id": format!("source:local:{trip}")}), T);
     assert_eq!(r["ok"], true, "the subfolder is listed: {r}");
     assert_eq!(h.app.session.browse.as_ref().map(|b| b.path.clone()), Some(trip.clone()), "clicking it browses it");

@@ -216,6 +216,18 @@ impl Headless {
         self.paint()
     }
 
+    /// Tests that browse a folder in the temp directory expect it to be a Local location of its
+    /// own. Where the temp directory lies inside the home folder (Windows), the sidebar lists it
+    /// inside Home's tree instead, so hide Home for the test; elsewhere this does nothing.
+    #[cfg(test)]
+    pub(crate) fn hide_home_above(&mut self, path: &std::path::Path) {
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+        if !home.is_empty() && lightcraft_catalog::query::folder_within(&path.to_string_lossy(), &home) {
+            let r = self.request("engine.execute", json!({"command": "local.hide", "params": {"path": home}}), Duration::from_secs(10));
+            assert_eq!(r["ok"], true, "{r}");
+        }
+    }
+
     /// Send a control-protocol request (see [`crate::control`]) and run frames until it is
     /// answered, then until its input has been consumed. Returns `{"ok": …, "result"|"error": …}`.
     pub fn request(&mut self, method: &str, params: Value, timeout: Duration) -> Value {
@@ -1317,10 +1329,13 @@ mod tests {
             w["result"].as_array().unwrap().iter().filter_map(|x| x["id"].as_str().map(String::from)).collect()
         };
         h.request("ui.set", json!({"leftPanel": true}), t);
+        h.hide_home_above(&dir);
         h.request("engine.execute", json!({"command": "library.browse", "params": {"path": path}}), t);
         h.settle(SETTLE);
         assert!(ids(&mut h).contains(&format!("source:local:{path}")));
-        assert!(!ids(&mut h).iter().any(|i| i == "source:local:restoreHidden"));
+        // the "Show hidden locations" row appears only while something is hidden
+        let hidden_before = !h.app.ui.hidden_locations.is_empty();
+        assert_eq!(ids(&mut h).iter().any(|i| i == "source:local:restoreHidden"), hidden_before);
         let r = h.request("engine.execute", json!({"command": "local.hide", "params": {"path": path}}), t);
         assert_eq!(r["ok"], true, "{r}");
         h.settle(SETTLE);
@@ -1331,7 +1346,11 @@ mod tests {
         assert_eq!(h.request("ui.clickWidget", json!({"id": "source:local:restoreHidden"}), t)["ok"], true);
         h.settle(SETTLE);
         assert!(h.app.ui.hidden_locations.is_empty());
-        assert!(ids(&mut h).contains(&format!("source:local:{path}")));
+        assert!(!ids(&mut h).iter().any(|i| i == "source:local:restoreHidden"), "nothing left to restore");
+        if !hidden_before {
+            // (with Home hidden for this test, the folder is back inside Home's tree instead)
+            assert!(ids(&mut h).contains(&format!("source:local:{path}")));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1348,8 +1367,10 @@ mod tests {
             std::fs::create_dir_all(base.join(d)).unwrap();
         }
         let s = |p: std::path::PathBuf| p.to_string_lossy().to_string();
-        let (photos, day1, day2, other) =
-            (s(base.join("Photos")), s(base.join("Photos/2026/20260101")), s(base.join("Photos/2026/20260114")), s(base.join("Other")));
+        // joined by component: the sidebar's ids spell paths with the platform's separator
+        let year = base.join("Photos").join("2026");
+        let (photos, day1, day2, other) = (s(base.join("Photos")), s(year.join("20260101")), s(year.join("20260114")), s(base.join("Other")));
+        h.hide_home_above(&base);
         let exec = |h: &mut Headless, c: &str, p: Value| h.request("engine.execute", json!({"command": c, "params": p}), t);
         let rects = |h: &mut Headless| -> std::collections::HashMap<String, f64> {
             let w = h.request("ui.widgets", json!({"filter": "lc-ui-roots-"}), t);
