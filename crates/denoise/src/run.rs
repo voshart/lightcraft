@@ -105,7 +105,10 @@ pub fn denoise_bayer(
     let mut wsum = vec![0f32; nx * ny];
     let group = p.parallel.max(1);
     let mut done = 0;
+    // where the time goes, printed under `LIGHTCRAFT_PROFILE`
+    let (mut t_model, mut t_blend) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     for chunk in tiles.chunks(group) {
+        let started = std::time::Instant::now();
         if ctl.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(Error::Cancelled);
         }
@@ -121,6 +124,8 @@ pub fn denoise_bayer(
                 Ok((input, out))
             })
             .collect();
+        t_model += started.elapsed();
+        let started = std::time::Instant::now();
         for (&(x0, y0, bx, ax, by, ay), r) in chunk.iter().zip(outs) {
             let (input, mut out) = r?;
             let side = 2 * p.tile;
@@ -137,7 +142,9 @@ pub fn denoise_bayer(
                 f(done, total);
             }
         }
+        t_blend += started.elapsed();
     }
+    let started = std::time::Instant::now();
     // normalise by the weights
     let (ox, oy) = (layout.position(0, 0).0, layout.position(0, 0).1);
     acc.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
@@ -150,6 +157,15 @@ pub fn denoise_bayer(
             }
         }
     });
+    if std::env::var_os("LIGHTCRAFT_PROFILE").is_some() {
+        eprintln!(
+            "[denoise] {total} tiles, {} at once: pack + model {:.0} ms, finish + blend {:.0} ms (one thread), normalise {:.0} ms",
+            group,
+            t_model.as_secs_f64() * 1e3,
+            t_blend.as_secs_f64() * 1e3,
+            started.elapsed().as_secs_f64() * 1e3
+        );
+    }
     Ok(Rgb32f { width, height, data: acc })
 }
 

@@ -230,6 +230,13 @@ fn work_section(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, list: &V
     if status["enabled"] != true {
         return;
     }
+    heading(ui, t, "Speed");
+    let mut gpu = list["gpu"].as_bool().unwrap_or(true);
+    if check(ui, "settings.denoiseGpu", &mut gpu, "Use the graphics card when it can run the model") {
+        let _ = app.run("denoise.settings", json!({"gpu": gpu}));
+        app.caches.denoise.epoch += 1;
+    }
+    hint(ui, t, &device_line(&status["device"], gpu));
     heading(ui, t, "Photos");
     let mut auto = list["auto"].as_bool().unwrap_or(true);
     if check(ui, "settings.denoiseAuto", &mut auto, "Make the denoised picture of the photos I am looking at") {
@@ -300,6 +307,21 @@ fn work_section(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, list: &V
             let _ = app.run("denoise.clear", json!({}));
         }
     });
+}
+
+/// Where the work runs, in a sentence (`denoise.status` → `device`).
+fn device_line(d: &Value, wanted: bool) -> String {
+    match d["kind"].as_str() {
+        Some("gpu") => {
+            let ms = d["tileMs"].as_f64().filter(|m| *m > 0.0).map(|m| format!(", about {m:.0} ms a tile")).unwrap_or_default();
+            format!("Running on {}{ms} (a 24 megapixel photo is 35 tiles).", d["adapter"].as_str().unwrap_or("the graphics card"))
+        }
+        Some("cpu") => {
+            format!("Running on the processor: {}.", d["reason"].as_str().unwrap_or("the graphics card is not used").trim_end_matches('.'))
+        }
+        _ if wanted => "The graphics card is looked at when the first photo is made.".into(),
+        _ => "The processor does the work.".into(),
+    }
 }
 
 fn model_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, m: &Value, dl: Option<&Value>, can_run: bool) {

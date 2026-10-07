@@ -407,6 +407,7 @@ fn files_that_cannot_be_denoised_fail_with_a_reason_and_never_a_panic() {
         model: Default::default(),
         loader: dim_loader(&Arc::new(AtomicUsize::new(0))),
         parallel: 2,
+        gpu: true,
     };
     use crate::denoise::{MakeError, make_product};
     // not a file
@@ -476,6 +477,7 @@ fn two_threads_making_the_same_picture_make_it_once() {
         model: Default::default(),
         loader: dim_loader(&runs),
         parallel: 2,
+        gpu: true,
     };
     let made: Vec<bool> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..4).map(|_| sc.spawn(|| crate::denoise::make_product(&spec, None).unwrap())).collect();
@@ -528,10 +530,24 @@ fn settings_are_checked_saved_and_a_paused_pump_starts_nothing() {
     let mut x = setup("settings", true);
     let r = x.s.execute("denoise.settings", &json!({"auto": false, "cacheGb": 5, "threads": 3})).unwrap();
     assert_eq!((r["auto"].clone(), r["cacheGb"].clone(), r["threads"].clone()), (json!(false), json!(5), json!(3)), "{r}");
-    for bad in [json!({"cacheGb": 0}), json!({"cacheGb": "big"}), json!({"threads": 0}), json!({"threads": 1000}), json!({"auto": "yes"})] {
+    for bad in [
+        json!({"cacheGb": 0}),
+        json!({"cacheGb": "big"}),
+        json!({"threads": 0}),
+        json!({"threads": 1000}),
+        json!({"auto": "yes"}),
+        json!({"gpu": "no"}),
+    ] {
         assert!(x.s.execute("denoise.settings", &bad).is_err(), "{bad}");
     }
     assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["cacheGb"], 5, "a refused change changes nothing");
+    // the graphics card is on unless the user turns it off, and the interface can read the choice back
+    assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["gpu"], true);
+    assert_eq!(x.s.execute("denoise.settings", &json!({"gpu": false})).unwrap()["gpu"], false);
+    assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["gpu"], false);
+    let status = x.s.execute("denoise.status", &json!({})).unwrap();
+    assert_eq!((status["gpu"].clone(), status["device"]["kind"].clone()), (json!(false), json!("none")), "no model is loaded yet: {status}");
+    x.s.execute("denoise.settings", &json!({"gpu": true})).unwrap();
     // with auto off nothing is started by itself, and the photo is made when asked
     let id = photo(&x.s);
     set_amount(&mut x.s, 100.0);

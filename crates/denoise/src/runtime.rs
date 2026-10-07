@@ -169,7 +169,7 @@ impl TileRunner for TractRunner {
 
 /// A deterministic test tile: four planes of a smooth gradient with noise on top, and the gradient alone for one
 /// plane (`tile × tile`).
-fn test_tile(t: usize) -> (Vec<f32>, Vec<f32>) {
+pub fn test_tile(t: usize) -> (Vec<f32>, Vec<f32>) {
     let mut seed = 0x2545_f491u32;
     let mut next = move || {
         seed ^= seed << 13;

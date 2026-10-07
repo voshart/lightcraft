@@ -77,6 +77,7 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
         "auto": st.auto(),
         "cacheGb": st.cache_bytes() >> 30,
         "threads": st.threads,
+        "gpu": st.gpu(),
         "models": models,
     }))
 }
@@ -166,7 +167,11 @@ fn install_file(s: &mut Session, c: &str, src: &Path, acknowledged: bool, activa
         return Err(fail("could not finish the copy", e));
     }
     // a model that does not work is never left installed
-    let test = (s.denoise.loader)(&final_path, &m).and_then(|model| model.self_test());
+    let gpu = s.denoise.settings.gpu();
+    let test = (s.denoise.loader)(&final_path, &m).and_then(|model| {
+        model.use_gpu(gpu);
+        model.self_test()
+    });
     let test = match test {
         Ok(t) => t,
         Err(e) => {
@@ -283,7 +288,11 @@ fn test(s: &mut Session, p: &Value) -> Result<Value> {
     let id = str_param(p, "id").ok_or_else(|| bad(C, "missing `id`"))?;
     let dir = models_dir(s, C)?;
     let found = installed_models(&dir).into_iter().find(|i| i.manifest.id == id).ok_or_else(|| bad(C, "that model is not installed"))?;
-    let result = (s.denoise.loader)(&found.onnx, &found.manifest).and_then(|m| m.self_test());
+    let gpu = s.denoise.settings.gpu();
+    let result = (s.denoise.loader)(&found.onnx, &found.manifest).and_then(|m| {
+        m.use_gpu(gpu);
+        m.self_test()
+    });
     let (ok, detail) = match &result {
         Ok(v) => (true, v.clone()),
         Err(e) => (false, json!(e)),
@@ -359,12 +368,15 @@ fn settings(s: &mut Session, p: &Value) -> Result<Value> {
             v => Some(v.as_u64().filter(|n| (1..=64).contains(n)).ok_or_else(|| bad(C, "`threads` must be from 1 to 64, or null"))? as u32),
         };
     }
+    if let Some(v) = p.get("gpu") {
+        st.gpu = Some(v.as_bool().ok_or_else(|| bad(C, "`gpu` must be true or false"))?);
+    }
     write_settings(&dir, &st).map_err(EngineError::Other)?;
     s.denoise.touch();
     s.denoise_refresh_active(true);
     // a smaller limit takes effect now
     s.denoise_evict(None);
-    Ok(json!({"auto": st.auto(), "cacheGb": st.cache_bytes() >> 30, "threads": st.threads}))
+    Ok(json!({"auto": st.auto(), "cacheGb": st.cache_bytes() >> 30, "threads": st.threads, "gpu": st.gpu()}))
 }
 
 fn ids_param(p: &Value) -> Option<Vec<PhotoId>> {
@@ -385,6 +397,8 @@ fn status_json(s: &Session, photo: Option<PhotoId>) -> Value {
         "ready": s.media.denoise.len(),
         "made": s.denoise_made(),
         "auto": st.auto(),
+        "gpu": st.gpu(),
+        "device": s.denoise_device(),
         "cache": {"files": files, "bytes": bytes, "limitBytes": st.cache_bytes()},
         "generation": s.denoise.generation,
     });
@@ -451,7 +465,7 @@ fn clear(s: &mut Session, _: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!(query "denoise.models.list", "Denoise Models", [], None, "{} → {dir, productsDir, model, runtime, auto, cacheGb, threads, models: [{id, name, version, licence{name, commercial, url, notice}, provenance, source, sizeBytes, sha256, tile, known, downloadHost, installed, selected, accepted}]}", always, list),
+        cmd!(query "denoise.models.list", "Denoise Models", [], None, "{} → {dir, productsDir, model, runtime, auto, cacheGb, threads, gpu, models: [{id, name, version, licence{name, commercial, url, notice}, provenance, source, sizeBytes, sha256, tile, known, downloadHost, installed, selected, accepted}]}", always, list),
         cmd!(query "denoise.models.install", "Install Denoise Model", [], None, "{path, acknowledged: true, activate?: true} → {installed, model} — install a denoise model from a file: an .onnx with a denoise-model.json beside it, or an archive LightCraft knows (the darktable `.dtmodel`). `acknowledged` must be true: the user has been shown the model's licence and accepted it. Unless `activate` is false it becomes the model in use", always, install),
         cmd!(query "denoise.models.download", "Download Denoise Model", [], None, "{id, acknowledged: true} → {started, from} — fetch a model LightCraft has a pinned address for (see `downloadHost` in the list) in the background with the system's curl. `acknowledged` must be true: the user has been shown the model's terms and accepted them. It is checked against its size and SHA-256, installed and chosen by itself; `denoise.models.downloads` shows how far it is", always, download),
         cmd!(query "denoise.models.downloads", "Denoise Model Downloads", [], None, "{} → {running, downloads: [{id, state: running | done | installed | failed | cancelled, bytes, total, error, from}]} — also installs any download that has arrived", always, downloads),
@@ -459,10 +473,10 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "denoise.models.test", "Test Denoise Model", [], None, "{id} → {ok, result} — load an installed model and check it gives sensible pictures; needs the denoise runtime", always, test),
         cmd!(query "denoise.models.remove", "Remove Denoise Model", [], None, "{id} → {removed, model} — delete an installed model (its cached pictures stay until they are evicted)", always, remove),
         cmd!(query "denoise.models.select", "Choose Denoise Model", [], None, "{id: installed model | null} → {model} — null switches denoise off", always, select),
-        cmd!(query "denoise.settings", "Denoise Settings", [], None, "{auto?: bool, cacheGb?: 1..10000, threads?: 1..64 | null} → the settings — `auto`: make the picture of the photos being looked at that have a Denoise amount; `cacheGb`: how much the cached pictures may take; `threads`: most tiles run at once", always, settings),
+        cmd!(query "denoise.settings", "Denoise Settings", [], None, "{auto?: bool, cacheGb?: 1..10000, threads?: 1..64 | null, gpu?: bool} → the settings — `auto`: make the picture of the photos being looked at that have a Denoise amount; `cacheGb`: how much the cached pictures may take; `threads`: most tiles run at once; `gpu`: use the graphics card when it can run the model (default true)", always, settings),
         cmd!(query "denoise.queue", "Denoise Photos", [], None, "{ids?: [photoId], scope?: selected | visible | withAmount, retry?: false} → {added, …status} — make the denoised pictures of raw photos that have none, in the background. `retry` tries photos that failed before", always, queue),
         cmd!(query "denoise.cancel", "Cancel Denoise", [], None, "{id?, all?} → {cancelled} — stop the photo being made and/or forget the ones waiting (all of them when `id` is omitted)", always, cancel),
-        cmd!(query "denoise.status", "Denoise Status", [], None, "{id?} → {enabled, model, runtime, productsDir, queued, running: {photo, done, total, seconds} | null, ready, made, auto, cache: {files, bytes, limitBytes}, generation, photo?: {state: notApplicable | noModel | ready | queued | running | failed | idle, …}}", always, status),
+        cmd!(query "denoise.status", "Denoise Status", [], None, "{id?} → {enabled, model, runtime, productsDir, queued, running: {photo, done, total, seconds} | null, ready, made, auto, gpu, device: {kind: gpu | cpu | pending | none, adapter?, tileMs?, reason?}, cache: {files, bytes, limitBytes}, generation, photo?: {state: notApplicable | noModel | ready | queued | running | failed | idle, …}}", always, status),
         cmd!(query "denoise.pump", "Denoise Pump", [], None, "{pace?: pause | light | normal | full} → {active, running, queued, ready, generation, downloading} — called every frame by the app: takes in finished work and keeps one photo going", always, pump),
         cmd!(query "denoise.clear", "Clear Denoise Cache", [], None, "{} → {deleted, bytes} — delete every cached denoised picture of this library (they are made again when wanted)", always, clear),
     ]
