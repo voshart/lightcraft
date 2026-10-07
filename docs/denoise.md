@@ -229,11 +229,17 @@ and the web build) has no runner: the commands say so and the slider stays out o
 
 - **Bayer raws only.** X-Trans (Fujifilm), Foveon, already demosaiced DNGs and non-raw photos keep their normal noise
   reduction. A *linear* (demosaiced RGB) model would cover those and DNGs from phones; the contract does not have it yet.
-- **The graphics card is tried on two adapters, both on Windows with DX12.** An NVIDIA RTX 4090 Laptop GPU (also on
-  Vulkan) and the small AMD Radeon 610M (2 compute units) built into the same laptop's CPU. Both give tract's answer to
-  1.6 × 10⁻⁶ of the largest value. Intel and Apple GPUs, Vulkan or Metal on other drivers, and macOS and Linux generally
-  are untested; the check against the CPU and the per-tile fallback are what keep an untested card from doing harm, not
-  evidence that it works or is fast.
+- **The graphics card is tried on four adapters, on two computers.** On Windows with DX12: an NVIDIA RTX 4090 Laptop GPU
+  (also on Vulkan) and the small AMD Radeon 610M (2 compute units) built into the same laptop's CPU. On Ubuntu 26.04 with
+  Vulkan (a 6-core / 12-thread Xeon laptop, run by a second tester with the public test files): an NVIDIA Quadro T1000
+  with 4 GB and the Intel UHD P630 built into that CPU. All four give tract's answer to 1.6 × 10⁻⁶ of the largest value.
+  The Quadro takes 84–93 ms a tile and denoises a 12–24 MP photo in 3.0–7.3 s (decoding and writing the cache included)
+  against 12–19 s on the processor; its memory use was about 460 MiB for the runner alone and about 910 MiB for a
+  denoise, render and export together, with no out-of-memory errors, tile fallbacks or timeouts. The Intel GPU takes
+  846 ms a tile, slower than that CPU with all its threads, so Automatic used the processor (13–23 s a photo) and forcing
+  the card was slower still (18–36 s). Not checked: Apple GPUs and Metal, AMD on Linux, a card used at the light and
+  background paces, whether the desktop stays responsive while a card works, and a processor-only install on a machine
+  that has no usable card.
 - **Automatic's choice is an estimate from one machine.** The Radeon 610M takes 483–494 ms a tile: about 3× faster than
   one CPU core (1.45–1.5 s) but about 2.5× slower than this machine's whole 16-core CPU (about 0.2 s a tile at its best).
   With Automatic a 24 MP photo at full pace runs on the processor (its model stage 10.7 s, including setting the Radeon up
@@ -242,6 +248,8 @@ and the web build) has no runner: the commands say so and the slider stays out o
   table above within about 30 % from 4 to 16 threads; on a CPU that scales differently a card close to the CPU's speed can be picked wrongly
   either way, at the cost of the difference between the two. Timing a card that is then not used costs about 2.5 s once
   per session on the Radeon.
+  The Ubuntu machine agreed with the rule in the other direction: one CPU core takes 2.1 s a tile there, so twelve threads
+  are estimated at about 0.33 s a tile, and the Quadro (0.09 s) was chosen while the Intel GPU (0.85 s) was not.
 - **tract stays the processor path** and the reference. The existing pure-Rust GPU ONNX runtime, wonnx, is archived and has
   no transposed convolution or depth-to-space (per the operator table on its repository page, October 2026), so the runner is ours:
   `lightcraft_gpu::nn`, driven by a plain description of the network (`lightcraft_denoise::net`) read from the ONNX file.
