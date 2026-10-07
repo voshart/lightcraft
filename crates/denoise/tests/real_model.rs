@@ -247,3 +247,46 @@ fn the_real_model_denoises_real_mosaics() {
         }
     }
 }
+
+/// The real model, read into the plain-data network the GPU runner executes, gives tract's answer (the reference interpreter is plain loops, so this takes about a minute).
+#[test]
+#[ignore = "needs a real model: see the module docs"]
+fn the_real_model_read_as_a_net_runs_like_tract() {
+    use tract_onnx::prelude::*;
+    let Some(model) = std::env::var_os("LC_DENOISE_MODEL") else { return };
+    let net = lightcraft_denoise::onnx::read(Path::new(&model)).unwrap();
+    println!(
+        "{} layers, {} input channels, {} output channels, depth {}, {:.1} GMAC per 512-cell tile",
+        net.ops().len(),
+        net.in_channels,
+        net.out_channels(),
+        net.depth(),
+        net.macs(512) as f64 / 1e9
+    );
+    assert_eq!((net.in_channels, net.out_channels(), net.depth()), (4, 3, 4));
+    // the file has its 512-cell shapes written in, so tract runs it at 512 only
+    let tile = 512usize;
+    assert!(net.fits_tile(tile));
+    let mut rng = Rng(0x1234_5678_9abc_def1);
+    let input: Vec<f32> =
+        (0..4 * tile * tile).map(|i| (0.2 + 0.3 * ((i % tile) as f64 / tile as f64) + 0.05 * rng.gauss()).clamp(0.0, 1.0) as f32).collect();
+    let started = Instant::now();
+    let ours = lightcraft_denoise::reference::run(&net, tile, &input).unwrap();
+    println!("reference: {:.1} s", started.elapsed().as_secs_f64());
+    let plan = tract_onnx::onnx()
+        .model_for_path(&model)
+        .unwrap()
+        .with_input_fact(0, f32::fact([1, 4, tile, tile]).into())
+        .unwrap()
+        .into_optimized()
+        .unwrap()
+        .into_runnable()
+        .unwrap();
+    let tensor: Tensor = tract_ndarray::Array4::from_shape_vec((1, 4, tile, tile), input).unwrap().into();
+    let theirs: Vec<f32> = plan.run(tvec!(tensor.into())).unwrap()[0].to_plain_array_view::<f32>().unwrap().iter().copied().collect();
+    assert_eq!(ours.len(), theirs.len());
+    let scale = theirs.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let worst = ours.iter().zip(&theirs).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    println!("largest output {scale:e}, worst difference {worst:e} ({:.2e} of it)", worst / scale);
+    assert!(worst <= 1e-4 * scale, "the network does not run like the model");
+}

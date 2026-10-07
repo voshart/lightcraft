@@ -11,6 +11,8 @@
 //! - [`product`]: the cache file the denoised picture is kept in (half floats, compressed in strips) and the
 //!   blend with the plain demosaic that the Amount slider controls.
 //! - [`runtime`] (feature `tract`): running an `.onnx` model on the CPU with tract.
+//! - [`net`] and [`onnx`] (feature `tract`): the network as plain data (a U-Net's few layer kinds with their weights),
+//!   which a GPU runner executes in place of tract.
 //!
 //! Everything here treats model files, manifests and cache files as hostile input: sizes are capped, numbers must
 //! be finite, and a malformed file is an error, never a panic.
@@ -21,10 +23,16 @@ pub mod archive;
 pub mod bayer;
 pub mod known;
 pub mod manifest;
+pub mod net;
+#[cfg(feature = "tract")]
+pub mod onnx;
 pub mod product;
+pub mod reference;
 pub mod run;
 #[cfg(feature = "tract")]
 pub mod runtime;
+#[doc(hidden)]
+pub mod synthetic;
 pub mod tiles;
 
 pub use manifest::{DenoiserManifest, Domain, Gain, ManifestError};
