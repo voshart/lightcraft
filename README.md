@@ -289,7 +289,7 @@ LightCraft is young and moving fast. **Where we honestly stand** (details in the
 - **The biggest gaps:**
   - **camera colour calibration:** raws other than DNG develop with a neutral colour matrix today, so colour is muted;
   - **CR3 and compressed Fujifilm / Olympus raws:** these open as embedded previews only;
-  - **AI masks:** subject and sky selection are classical heuristics; **AI Denoise** works on Bayer raws with a model you download ([docs/denoise.md](docs/denoise.md));
+  - **AI masks:** subject and sky selection are classical heuristics; **AI Denoise** works on Bayer raws with a model you download, on the graphics card when there is one ([docs/denoise.md](docs/denoise.md));
   - **HDR, video and the Classic Print / Book / Map modules.**
 - **What's next:** see [where we're going](ROADMAP.md#where-were-going).
 

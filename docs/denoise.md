@@ -90,18 +90,20 @@ whose output has a scale of its own, as RawNIND's is: about a million times the 
 
 ## What it does to a picture
 
-The mosaic is cut into 512-cell tiles that overlap by 64 cells, run through the model on the CPU (tract, pure Rust), and
-the tiles are blended across their overlaps with smoothstep weights; clipped highlights are kept as they were (a model
+The mosaic is cut into 512-cell tiles that overlap by 64 cells, run through the model on the graphics card when there is
+one that can run it (our own wgpu kernels, pure Rust) and otherwise on the CPU (tract, pure Rust), and the tiles are
+blended across their overlaps with smoothstep weights; clipped highlights are kept as they were (a model
 must not invent detail in blown areas). The result is stored as f16 planar strips, byte-shuffled and deflated, with a CRC
 per strip, and read back in the window and at the binned size the pipeline's preview needs, so the loupe at any zoom and a
 full-size export line up with the plain picture to the pixel.
 
 Measured with the real model on five CC0 raws from `corpus/raw` (one Pentax K-3, one Nikon D5100, one Canon 6D, one Sony
-a7 III, one Pixel 2 XL DNG), Ryzen 9 7945HX (16 cores / 32 threads), release build, `cargo test --release --features denoise --test denoise_real -- --ignored`:
+a7 III, one Pixel 2 XL DNG), Ryzen 9 7945HX (16 cores / 32 threads), release build, `cargo test --release --features denoise --test denoise_real -- --ignored`
+(`LC_DENOISE_GPU=0` for the processor alone). The first table is the processor; the graphics card follows it:
 
 | | |
 |---|---|
-| Time to make a picture, start to finish | 5–9 s for 12–24 MP at full pace (a 24 MP Sony ARW 9 s, a 12 MP Pixel DNG 5 s), in the background |
+| Time to make a picture, start to finish, on the processor | 5–9 s for 12–24 MP at full pace (a 24 MP Sony ARW 9 s, a 12 MP Pixel DNG 5 s), in the background |
 | Fine-detail roughness at Amount 100 (mean absolute second difference of the luma, 1600 px preview) | 4–26 % lower than the plain picture, by file |
 | Cache size per photo | 41–68 MB |
 | Memory | about 1.9 GB peak working set (release build) for the whole test process (one file each, a 24 MP Sony and a 12 MP Pixel: making the picture, two renders and an export) |
@@ -110,7 +112,53 @@ a7 III, one Pixel 2 XL DNG), Ryzen 9 7945HX (16 cores / 32 threads), release bui
 Those are *measurements of whether it works* — a lower roughness is not proof it looks better. There is no side-by-side
 comparison against Lightroom's AI Denoise yet (see *Render fidelity* in the roadmap).
 
-### Why it takes that long, and what a smaller machine gets
+### On a graphics card
+
+The same network runs as WGSL compute kernels (`crates/gpu/src/nn.rs`, `wgsl/nn_conv.wgsl`, `wgsl/nn_pool.wgsl`): each
+convolution is a tiled matrix product (the 3 × 3 taps and the input channels are the rows of the weight matrix) with the
+leaky ReLU, the join of a skip connection, the transposed convolution and the last depth-to-space folded into the same
+kernels, and activations kept in as few buffers as the network's lifetimes allow. It is pure Rust and runs through wgpu on
+DX12, Vulkan or Metal; the device is a separate one from the interactive renders (they share the switches and the crash
+sentinel: `LIGHTCRAFT_GPU=0`, `LIGHTCRAFT_GPU_BACKEND`, the GPU rendering preference).
+
+Measured on an NVIDIA GeForce RTX 4090 Laptop GPU (the only adapter tried so far), release build, the real model:
+
+| | |
+|---|---|
+| One 512-cell tile on the card | 12–15 ms with two tiles in flight (DX12; Vulkan 13–16 ms). One CPU core takes 1.4 s; the whole 16-core CPU at its best takes 6.7 s for a 24 MP photo's 35 tiles, the card about 0.45 s |
+| The card's answer against tract's | within 1.6 × 10⁻⁶ of the largest value in the tile |
+| A picture, start to finish | about 1.0–1.8 s for 12–24 MP (a 3–4 s outlier or two when the machine was busy with other work); the first photo of a session also pays about 1 s to set the card up and 1.4 s for the check against the CPU |
+| Where a 24 MP photo's second goes | reading and decoding 0.15–0.25 s, packing + the model + blending 0.55 s, writing the picture 0.3–0.7 s (the numbers move with what else the machine is doing) |
+| Setting up | about 1 s: the three convolution kernels build in about 0.2 s each on DX12 |
+| Video memory | the runner's own count is 164 MB per tile in flight (two at once) plus the 31 MB of weights |
+
+Rules it follows, so a graphics card never makes things worse:
+
+- **It has to agree with the processor.** The first time a model is used, the card and the CPU runner both run a test tile
+  and the card is only used if the answers match within 10⁻³ of the largest value. A card that disagrees, runs out of
+  memory, or cannot build the kernels is not used, and Settings says why (`denoise.status` → `device`).
+- **A tile it fails is run on the CPU**, and a device that errors or is lost is not used again in this session, so a
+  photo is always finished.
+- **Only networks it knows**: convolutions (1 × 1 and 3 × 3), 2 × 2 transposed convolutions, leaky ReLU, 2 × 2 max-pool, skip
+  joins and a final depth-to-space, with every channel count a multiple of 4 and a tile up to 1024 cells. Another model
+  runs on the CPU.
+- **Software adapters are skipped** (the CPU is faster than a software rasteriser).
+- Settings ▸ AI Denoise ▸ Speed has **Use the graphics card when it can run the model** (default on; `denoise.settings {gpu}`),
+  and under it the adapter and its time per tile. Four tiles at once are enough to keep a card busy, so the pace setting
+  lends the processor fewer threads while a card does the work.
+
+To try another card (more than one GPU, or a laptop with an integrated one next to a discrete one): the adapter is picked
+as the high-performance one, or by name with `LIGHTCRAFT_GPU_ADAPTER=<part of its name>` (e.g. `=radeon`, `=intel`), and
+the API with `LIGHTCRAFT_GPU_BACKEND=dx12|vulkan|metal`. `LC_DENOISE_MODEL=<model_bayer.onnx> cargo test --release -p lightcraft-gpu --lib real_model_on_the_gpu_matches_tract -- --ignored --nocapture`
+checks the card against tract on the real network and prints the adapter, its set-up time and its time per tile;
+`time_a_shader_build` (same crate, with `LC_SHADER` and `LC_BLOCKS`) times a kernel build. The kernels are checked on
+synthetic networks of several sizes against a plain-loop reference interpreter on every test run that has an adapter.
+
+DX12 and Vulkan gave the same speed here, but DX12's shader compiler took 53 s over one convolution kernel until wgpu's
+workgroup-memory zeroing was switched off for these pipelines (it is written out as one store per element); it now takes
+0.2 s. Another vendor's compiler may have other surprises: a first look at the set-up time in the test above is worth it.
+
+### On the processor: why it takes that long, and what a smaller machine gets
 
 The model is a U-Net run over 512 × 512-cell tiles (1 MP each) that overlap by 64 cells, so a 24 MP photo is 35 tiles and a
 12 MP photo about 15. One tile costs about 1.4 s on one core of the test machine (an AMD Ryzen 9 7945HX, 16 cores / 32 threads, a high-end laptop chip), so the whole
@@ -135,8 +183,8 @@ What that means elsewhere (estimates from the table, not measurements on those m
 - **It is paid once per photo and model.** The picture is cached, so moving the slider, reopening the photo and the
   second export are instant; only changing the file or the model repeats it.
 - **Still slow compared with what people expect from a slider.** Waiting seconds for a photo's first clean picture is
-  the cost of running a neural network on a CPU. Real improvements would be a GPU path or a smaller / quantised model;
-  neither is built, and the only model offered here is the 31 MB RawNIND one.
+  the cost of running a neural network on a CPU; a graphics card (above) is the fix, and a smaller or quantised model
+  would be another. The only model offered here is the 31 MB RawNIND one.
 
 ## Making pictures
 
@@ -165,11 +213,14 @@ and the web build) has no runner: the commands say so and the slider stays out o
 
 - **Bayer raws only.** X-Trans (Fujifilm), Foveon, already demosaiced DNGs and non-raw photos keep their normal noise
   reduction. A *linear* (demosaiced RGB) model would cover those and DNGs from phones; the contract does not have it yet.
-- **CPU only, and CPU-bound.** The model does about 1.4 s of work per 1-megapixel tile on one core, and a 24 MP photo is 35
-  tiles. It runs as fast as the cores allow (table above). There is no GPU path: tract, the runtime used here, has only
-  CPU kernels (GPU ONNX runtimes written in Rust, such as wonnx and burn, were not evaluated; ONNX Runtime would break
-  the pure-Rust rule). Not built, not measured. See *A GPU
-  path* below.
+- **The graphics card is tried on one adapter.** Everything above about the card is measured on one NVIDIA laptop GPU.
+  AMD, Intel and Apple GPUs, integrated GPUs and Vulkan or Metal on other drivers are untested; the check against the
+  CPU and the per-tile fallback are what keep an untested card from doing harm, not evidence that it is fast. An
+  integrated GPU with a couple of compute units may be no faster than the CPU (the set-up check reports its time per
+  tile, but nothing switches back to the CPU for being slow: turn the card off in Settings).
+- **tract stays the processor path** and the reference. The existing pure-Rust GPU ONNX runtime, wonnx, is archived and has
+  no transposed convolution or depth-to-space (per the operator table on its repository page, October 2026), so the runner is ours:
+  `lightcraft_gpu::nn`, driven by a plain description of the network (`lightcraft_denoise::net`) read from the ONNX file.
 - **No quality comparison** against Lightroom, and no tuning of the blend for dark or clipped areas beyond keeping clipped
   highlights.
 - **The weights are GPL-3.0** (above), and RawNIND was trained on a limited set of sensors.
@@ -179,16 +230,10 @@ and the web build) has no runner: the commands say so and the slider stays out o
 1. A maintainer decision on the model: keep the opt-in GPL download, or **train our own on the RawNIND data** (CC BY 4.0 /
    CC0, the paper describes the recipe) and publish MIT/Apache weights; then the button can be a plain one.
 2. A linear-RGB contract for X-Trans and phone DNGs.
-3. **A GPU path.** Not a hard problem, only unbuilt. The RawNIND Bayer model has seven kinds of node (tract's count of the
-   file): 19 convolutions, 4 transposed convolutions, 18 LeakyReLU, 4 max-pools, 4 concats and one depth-to-space, with no
-   attention or normalisation layers. Its convolutions come to about 93 GFLOP per tile (tract's cost model, convolutions
-   only), so about 3 TFLOP for a 24 MP photo; the biggest feature map is 64 channels × 512 × 512 floats (67 MB). A runner
-   written as WGSL compute kernels in the existing wgpu pipeline (`crates/gpu`) would plug in behind the same
-   one-tile-in, one-tile-out interface the CPU runner has (`run::TileRunner`), leaving the cache, the commands and the
-   interface alone, and the CPU runner would be its reference: tile outputs must match within a tolerance, as the GPU
-   develop pipeline already does against the CPU one. The cost is mostly in making the convolution kernel fast (a portable shader will
-   not reach a GPU's peak); no buffer is larger than 67 MB, inside wgpu's default binding limit. The gain depends on
-   the adapter: a discrete GPU should do the model stage in about a second (an estimate, not a measurement), but an
-   integrated one with a couple of compute units would be no faster than the CPU, so it must pick the adapter and fall
-   back.
+3. **The graphics card on more hardware, and faster.** The model does about 93 GFLOP per tile (tract's cost model,
+   convolutions only), 3.2 TFLOP for a 24 MP photo, so the card's 12–15 ms per tile is about 7 TFLOP/s. The kernels are
+   plain 32-bit shaders, so there is probably headroom (16-bit weights and activations, cooperative-matrix instructions
+   where the adapter has them), but that is a guess: the card's peak was not measured. More worth doing first: try AMD, Intel and
+   Apple adapters and an integrated GPU (see *On a graphics card* for how), and overlap one photo's decode and write
+   with the next photo's tiles, since on the card the rest of the pipeline is now more than half of a photo's time.
 4. A side-by-side fidelity suite (shared with the render-fidelity work).
