@@ -12,7 +12,7 @@ use lightcraft_denoise::run::TileRunner;
 use serde_json::{Value, json};
 
 use crate::Session;
-use crate::denoise::{Loader, Model, PhotoState};
+use crate::denoise::{Loader, Model, PhotoState, RunOn};
 use crate::export::{ExportOptions, export_photo};
 use crate::tests_xmp::{synthetic_dng_of, temp_dir};
 
@@ -41,11 +41,11 @@ impl TileRunner for Dim {
 }
 
 impl Model for Dim {
-    fn runner(&self) -> &dyn TileRunner {
-        self
+    fn runner(&self, _: RunOn, threads: usize) -> (&dyn TileRunner, usize) {
+        (self, threads)
     }
 
-    fn self_test(&self) -> Result<Value, String> {
+    fn self_test(&self, _: RunOn) -> Result<Value, String> {
         Ok(json!({"ok": true}))
     }
 }
@@ -407,7 +407,7 @@ fn files_that_cannot_be_denoised_fail_with_a_reason_and_never_a_panic() {
         model: Default::default(),
         loader: dim_loader(&Arc::new(AtomicUsize::new(0))),
         parallel: 2,
-        gpu: true,
+        run_on: RunOn::Auto,
     };
     use crate::denoise::{MakeError, make_product};
     // not a file
@@ -429,10 +429,10 @@ fn files_that_cannot_be_denoised_fail_with_a_reason_and_never_a_panic() {
         }
     }
     impl Model for Wrong {
-        fn runner(&self) -> &dyn TileRunner {
-            self
+        fn runner(&self, _: RunOn, threads: usize) -> (&dyn TileRunner, usize) {
+            (self, threads)
         }
-        fn self_test(&self) -> Result<Value, String> {
+        fn self_test(&self, _: RunOn) -> Result<Value, String> {
             Err("no".into())
         }
     }
@@ -477,7 +477,7 @@ fn two_threads_making_the_same_picture_make_it_once() {
         model: Default::default(),
         loader: dim_loader(&runs),
         parallel: 2,
-        gpu: true,
+        run_on: RunOn::Auto,
     };
     let made: Vec<bool> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..4).map(|_| sc.spawn(|| crate::denoise::make_product(&spec, None).unwrap())).collect();
@@ -536,18 +536,31 @@ fn settings_are_checked_saved_and_a_paused_pump_starts_nothing() {
         json!({"threads": 0}),
         json!({"threads": 1000}),
         json!({"auto": "yes"}),
-        json!({"gpu": "no"}),
+        json!({"runOn": "fastest"}),
+        json!({"runOn": true}),
     ] {
         assert!(x.s.execute("denoise.settings", &bad).is_err(), "{bad}");
     }
     assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["cacheGb"], 5, "a refused change changes nothing");
-    // the graphics card is on unless the user turns it off, and the interface can read the choice back
-    assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["gpu"], true);
-    assert_eq!(x.s.execute("denoise.settings", &json!({"gpu": false})).unwrap()["gpu"], false);
-    assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["gpu"], false);
+    // the faster of the card and the processor unless the user says otherwise, and the interface can read the choice back
+    assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["runOn"], "auto");
+    assert_eq!(x.s.execute("denoise.settings", &json!({"runOn": "cpu"})).unwrap()["runOn"], "cpu");
+    assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["runOn"], "cpu");
     let status = x.s.execute("denoise.status", &json!({})).unwrap();
-    assert_eq!((status["gpu"].clone(), status["device"]["kind"].clone()), (json!(false), json!("none")), "no model is loaded yet: {status}");
-    x.s.execute("denoise.settings", &json!({"gpu": true})).unwrap();
+    assert_eq!((status["runOn"].clone(), status["device"]["kind"].clone()), (json!("cpu"), json!("none")), "no model is loaded yet: {status}");
+    // the setting before `runOn` still reads as what it meant
+    let models = x.s.denoise.models_dir.clone().unwrap();
+    let mut st = crate::denoise::read_settings(&models);
+    (st.run_on, st.gpu) = (None, Some(false));
+    crate::denoise::write_settings(&models, &st).unwrap();
+    assert_eq!(x.s.execute("denoise.models.list", &json!({})).unwrap()["runOn"], "cpu");
+    // choosing where it runs lets the card be tried again after a set-up that closed LightCraft
+    let onnx = crate::denoise::installed_models(&models).first().unwrap().onnx.clone();
+    let marker = onnx.with_file_name(crate::denoise::GPU_SETUP_MARKER);
+    std::fs::write(&marker, "setting up").unwrap();
+    assert_eq!(x.s.execute("denoise.settings", &json!({"runOn": "auto"})).unwrap()["runOn"], "auto");
+    assert!(!marker.exists(), "the crash is forgotten");
+    assert_eq!(crate::denoise::read_settings(&models).gpu, None, "the old setting is not kept beside the new one");
     // with auto off nothing is started by itself, and the photo is made when asked
     let id = photo(&x.s);
     set_amount(&mut x.s, 100.0);

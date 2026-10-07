@@ -11,7 +11,7 @@ use lightcraft_engine::denoise::PhotoState;
 use serde_json::{Value, json};
 
 use super::faces::{licence_line, mb, open_page, sentence, window_pace};
-use super::settings::{check, heading, hint};
+use super::settings::{check, choices, heading, hint};
 use crate::LightcraftApp;
 use crate::theme::Tokens;
 use crate::widgets::register;
@@ -231,12 +231,28 @@ fn work_section(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, list: &V
         return;
     }
     heading(ui, t, "Speed");
-    let mut gpu = list["gpu"].as_bool().unwrap_or(true);
-    if check(ui, "settings.denoiseGpu", &mut gpu, "Use the graphics card when it can run the model") {
-        let _ = app.run("denoise.settings", json!({"gpu": gpu}));
+    let current = list["runOn"].as_str().unwrap_or("auto").to_string();
+    let mut run_on = current.as_str();
+    let options = [("auto", "Automatic"), ("gpu", "Graphics card"), ("cpu", "Processor")];
+    if ui.horizontal(|ui| choices(ui, "denoiseRunOn", &options, &mut run_on)).inner {
+        let _ = app.run("denoise.settings", json!({"runOn": run_on}));
         app.caches.denoise.epoch += 1;
     }
-    hint(ui, t, &device_line(&status["device"], gpu));
+    hint(
+        ui,
+        t,
+        "Automatic uses the graphics card where it is faster than the processor: both are timed on this computer the first time a photo is made.",
+    );
+    hint(ui, t, &device_line(&status["device"], run_on));
+    if run_on != "cpu" && status["device"]["retry"] == true {
+        let r = ui.small_button(crate::i18n::tr("Try the graphics card again"));
+        register(ui.ctx(), "denoise:retryGpu", r.rect);
+        if r.clicked() {
+            // choosing where it runs, even the same again, forgets the failed set-up
+            let _ = app.run("denoise.settings", json!({"runOn": run_on}));
+            app.caches.denoise.epoch += 1;
+        }
+    }
     heading(ui, t, "Photos");
     let mut auto = list["auto"].as_bool().unwrap_or(true);
     if check(ui, "settings.denoiseAuto", &mut auto, "Make the denoised picture of the photos I am looking at") {
@@ -309,18 +325,16 @@ fn work_section(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, list: &V
     });
 }
 
-/// Where the work runs, in a sentence (`denoise.status` → `device`).
-fn device_line(d: &Value, wanted: bool) -> String {
+/// Where the work runs, in a sentence (`denoise.status` → `device`), for the setting `run_on`. No timings: they are this
+/// computer's, and only the comparison matters.
+fn device_line(d: &Value, run_on: &str) -> String {
     match d["kind"].as_str() {
-        Some("gpu") => {
-            let ms = d["tileMs"].as_f64().filter(|m| *m > 0.0).map(|m| format!(", about {m:.0} ms a tile")).unwrap_or_default();
-            format!("Running on {}{ms} (a 24 megapixel photo is 35 tiles).", d["adapter"].as_str().unwrap_or("the graphics card"))
-        }
+        _ if run_on == "cpu" => "The processor does the work.".into(),
+        Some("gpu") => format!("Running on {}.", d["adapter"].as_str().unwrap_or("the graphics card")),
         Some("cpu") => {
             format!("Running on the processor: {}.", d["reason"].as_str().unwrap_or("the graphics card is not used").trim_end_matches('.'))
         }
-        _ if wanted => "The graphics card is looked at when the first photo is made.".into(),
-        _ => "The processor does the work.".into(),
+        _ => "The graphics card is set up when the next photo is made.".into(),
     }
 }
 

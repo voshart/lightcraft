@@ -188,6 +188,33 @@ pub fn test_tile(t: usize) -> (Vec<f32>, Vec<f32>) {
     (input, base)
 }
 
+/// A tile for checking that two runners of one model agree: the whole range a raw photo has rather than the test tile's
+/// mid-greys — a noisy ramp from black to white across the tile, a flat black corner and a clipped white one (four
+/// planes of `tile × tile`).
+pub fn check_tile(t: usize) -> Vec<f32> {
+    let mut seed = 0x9e37_79b9u32;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let (edge, span) = ((t / 8).max(1), (2 * t).saturating_sub(2).max(1) as f32);
+    (0..4 * t * t)
+        .map(|i| {
+            let (x, y) = ((i % (t * t)) % t, (i % (t * t)) / t);
+            let n = next() + next() + next() + next() - 2.0;
+            if x < edge && y < edge {
+                0.0
+            } else if x + edge >= t && y + edge >= t {
+                1.0
+            } else {
+                ((x + y) as f32 / span + 0.05 * n).clamp(0.0, 1.0)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +374,23 @@ mod tests {
         }
         assert!(TractRunner::load(&std::env::temp_dir().join("does-not-exist.onnx"), &manifest(64, 1.0)).is_err());
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn the_check_tile_covers_black_to_white() {
+        for t in [1, 2, 7, 64] {
+            let c = check_tile(t);
+            assert_eq!(c.len(), 4 * t * t);
+            assert!(c.iter().all(|v| (0.0..=1.0).contains(v)), "{t}");
+        }
+        let c = check_tile(64);
+        let near = |lo: f32, hi: f32| c.iter().filter(|v| (lo..=hi).contains(*v)).count();
+        assert!(near(0.0, 0.0) >= 4 * 8 * 8 && near(1.0, 1.0) >= 4 * 8 * 8, "a flat black and a clipped white corner");
+        for band in 0..10 {
+            let lo = band as f32 / 10.0;
+            assert!(near(lo, lo + 0.1) > 100, "values around {lo}");
+        }
+        assert_eq!(check_tile(64), c, "the same tile every time");
     }
 
     #[test]

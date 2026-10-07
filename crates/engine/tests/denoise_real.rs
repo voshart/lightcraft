@@ -8,7 +8,7 @@
 //! ```
 //!
 //! `LC_DENOISE_RAW` is a folder of CC0 raw files (`cargo xtask corpus --download` → `corpus/raw`); every file in it is
-//! tried. Optional: `LC_DENOISE_ONLY` (a file name to try alone), `LC_DENOISE_GPU=0` (the CPU only, to compare).
+//! tried. Optional: `LC_DENOISE_ONLY` (a file name to try alone), `LC_DENOISE_RUN_ON=cpu|gpu|auto` (where the model runs; `cpu` to compare with the card).
 #![cfg(feature = "denoise")]
 
 use std::path::{Path, PathBuf};
@@ -67,8 +67,8 @@ fn the_real_model_denoises_real_raws_through_the_engine() {
     let r = s.execute("denoise.models.install", &json!({"path": model.to_string_lossy(), "acknowledged": true})).unwrap();
     println!("installed {} in {:.1} s: self-test {}", r["installed"]["id"], t.elapsed().as_secs_f64(), r["installed"]["accepted"]["selfTest"]);
     assert_eq!(r["installed"]["id"], "rawnind-bayer");
-    if std::env::var("LC_DENOISE_GPU").is_ok_and(|v| v == "0") {
-        s.execute("denoise.settings", &json!({"gpu": false})).unwrap();
+    if let Ok(run_on) = std::env::var("LC_DENOISE_RUN_ON") {
+        s.execute("denoise.settings", &json!({"runOn": run_on})).unwrap();
     }
 
     for file in files(Path::new(&raws)) {

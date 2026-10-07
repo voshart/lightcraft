@@ -99,7 +99,7 @@ full-size export line up with the plain picture to the pixel.
 
 Measured with the real model on five CC0 raws from `corpus/raw` (one Pentax K-3, one Nikon D5100, one Canon 6D, one Sony
 a7 III, one Pixel 2 XL DNG), Ryzen 9 7945HX (16 cores / 32 threads), release build, `cargo test --release --features denoise --test denoise_real -- --ignored`
-(`LC_DENOISE_GPU=0` for the processor alone). The first table is the processor; the graphics card follows it:
+(`LC_DENOISE_RUN_ON=cpu` for the processor alone). The first table is the processor; the graphics card follows it:
 
 | | |
 |---|---|
@@ -127,25 +127,41 @@ Measured on an NVIDIA GeForce RTX 4090 Laptop GPU (the main adapter tried; a sec
 |---|---|
 | One 512-cell tile on the card | 12–15 ms with two tiles in flight (DX12; Vulkan 13–16 ms). One CPU core takes 1.4 s; the whole 16-core CPU at its best takes 6.7 s for a 24 MP photo's 35 tiles, the card about 0.45 s |
 | The card's answer against tract's | within 1.6 × 10⁻⁶ of the largest value in the tile |
-| A picture, start to finish | about 1.0–1.8 s for 12–24 MP (a 3–4 s outlier or two when the machine was busy with other work); the first photo of a session also pays about 1 s to set the card up and 1.4 s for the check against the CPU |
+| A picture, start to finish | about 1.0–1.8 s for 12–24 MP (a 3–4 s outlier or two when the machine was busy with other work); the first photo of a session also pays about 2 s: loading the model (0.6 s), and setting the card up while the CPU runs the check tile beside it (about 1.5 s) |
 | Where a 24 MP photo's second goes | reading and decoding 0.15–0.25 s, packing + the model + blending 0.55 s, writing the picture 0.3–0.7 s (the numbers move with what else the machine is doing) |
 | Setting up | about 1 s: the three convolution kernels build in about 0.2 s each on DX12 |
 | Video memory | the runner's own count is 164 MB per tile in flight (two at once) plus the 31 MB of weights |
 
 Rules it follows, so a graphics card never makes things worse:
 
-- **It has to agree with the processor.** The first time a model is used, the card and the CPU runner both run a test tile
-  and the card is only used if the answers match within 10⁻³ of the largest value. A card that disagrees, runs out of
-  memory, or cannot build the kernels is not used, and Settings says why (`denoise.status` → `device`).
-- **A tile it fails is run on the CPU**, and a device that errors or is lost is not used again in this session, so a
-  photo is always finished.
+- **It has to agree with the processor.** The first time a model may use the card, the card and the CPU runner both run a
+  check tile — a noisy ramp from black to white with a flat black and a clipped white corner, so the whole range of a raw
+  is covered — and the card is only used if the answers match within 10⁻³ of the largest value. A card that disagrees,
+  runs out of memory, or cannot build the kernels is not used, and Settings says why (`denoise.status` → `device`).
+- **It has to be faster** (Settings ▸ AI Denoise ▸ Speed ▸ **Automatic**, the default). The same check times the card
+  (its best of a few runs) and the CPU (one tile on one thread), and each photo goes to the card only when it is faster
+  than the CPU with the threads the pace lends it. The CPU's time with several threads is estimated from the one tile
+  (each thread past the first counts as half a thread: on the test machine one tile alone took 1.4 s and sixteen at once
+  finished one every 0.2 s). So a big card always wins; the small Radeon below loses to sixteen threads (an export, or
+  Settings open) and wins against the two the queue gets while you work. **Graphics card** uses the card whenever it
+  can; **Processor** never sets it up. The times are this computer's: they are in `denoise.status` → `device` (`cardMs`,
+  `cpuMs`) and in a model's test result, never on screen.
+- **A tile it gets wrong is run on the CPU** (an error, or numbers that are not finite); after three such tiles the card
+  is not used for that model again in the session, and a device that errors or is lost is not used again either, so a
+  photo is always finished and never has a broken tile in it.
+- **Setting up has a time limit and a crash guard.** The card is set up on a thread of its own: if building the kernels
+  and running the check take longer than 30 s the CPU does the work, and a file `gpu-setup.marker` sits beside the model
+  while it happens. A driver crash takes LightCraft with it; the marker is still there at the next start, so the card is
+  not tried again and Settings says why, with **Try the graphics card again**. Choosing where denoise runs
+  (`denoise.settings {runOn}`) forgets the crash.
 - **Only networks it knows**: convolutions (1 × 1 and 3 × 3), 2 × 2 transposed convolutions, leaky ReLU, 2 × 2 max-pool, skip
   joins and a final depth-to-space, with every channel count a multiple of 4 and a tile up to 1024 cells. Another model
   runs on the CPU.
 - **Software adapters are skipped** (the CPU is faster than a software rasteriser).
-- Settings ▸ AI Denoise ▸ Speed has **Use the graphics card when it can run the model** (default on; `denoise.settings {gpu}`),
-  and under it the adapter and its time per tile. Four tiles at once are enough to keep a card busy, so the pace setting
-  lends the processor fewer threads while a card does the work.
+- Settings ▸ AI Denoise ▸ Speed has **Automatic**, **Graphics card** and **Processor** (`denoise.settings {runOn: auto |
+  gpu | cpu}`), and under them where the last photo ran and, on the processor, why (no timings: they would only be true
+  of this computer). Four tiles at once are enough to keep a card busy, so the pace setting lends the processor fewer
+  threads while a card does the work.
 
 To try another card (more than one GPU, or a laptop with an integrated one next to a discrete one): the adapter is picked
 as the high-performance one, or by name with `LIGHTCRAFT_GPU_ADAPTER=<part of its name>` (e.g. `=radeon`, `=intel`), and
@@ -218,12 +234,14 @@ and the web build) has no runner: the commands say so and the slider stays out o
   1.6 × 10⁻⁶ of the largest value. Intel and Apple GPUs, Vulkan or Metal on other drivers, and macOS and Linux generally
   are untested; the check against the CPU and the per-tile fallback are what keep an untested card from doing harm, not
   evidence that it works or is fast.
-- **A small card is slower than a big processor, and nothing switches away from it.** The Radeon 610M takes 485–494 ms
-  a tile: about 3× faster than one CPU core (1.46 s) but about 2.5× slower than this machine's whole 16-core CPU
-  (about 0.19 s a tile at its best), so a 24 MP photo would take about 17 s on it against about 7 s on the processor.
-  The runner asks for the high-performance adapter (here the NVIDIA one), but on a machine whose only GPU is an integrated
-  one the card is used while the checkbox is on, even where the processor would be faster. The set-up already runs a
-  tile on both, so comparing them is free; it is not done yet.
+- **Automatic's choice is an estimate from one machine.** The Radeon 610M takes 483–494 ms a tile: about 3× faster than
+  one CPU core (1.45–1.5 s) but about 2.5× slower than this machine's whole 16-core CPU (about 0.2 s a tile at its best).
+  With Automatic a 24 MP photo at full pace runs on the processor (its model stage 10.7 s, including setting the Radeon up
+  and timing it, against about 17 s for the Radeon's tiles alone), and in the background, with two threads, on the
+  Radeon. The rule for the CPU with many threads (each one past the first is half a thread) matches this machine's
+  table above within about 30 % from 4 to 16 threads; on a CPU that scales differently a card close to the CPU's speed can be picked wrongly
+  either way, at the cost of the difference between the two. Timing a card that is then not used costs about 2.5 s once
+  per session on the Radeon.
 - **tract stays the processor path** and the reference. The existing pure-Rust GPU ONNX runtime, wonnx, is archived and has
   no transposed convolution or depth-to-space (per the operator table on its repository page, October 2026), so the runner is ours:
   `lightcraft_gpu::nn`, driven by a plain description of the network (`lightcraft_denoise::net`) read from the ONNX file.

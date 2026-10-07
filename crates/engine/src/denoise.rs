@@ -57,22 +57,53 @@ const STACK: usize = 16 << 20;
 // ---------------------------------------------------------------------------------------------------------------------
 // the model
 
+/// Where the model runs (Settings ▸ AI Denoise ▸ Speed; `denoise.settings {runOn}`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RunOn {
+    /// The graphics card where it is faster than the processor at the pace the work goes at (both are timed on this
+    /// computer when the card is set up), else the processor.
+    #[default]
+    Auto,
+    /// The graphics card whenever it can run the model, even where the processor would be faster.
+    Gpu,
+    /// Always the processor.
+    Cpu,
+}
+
+impl RunOn {
+    /// `auto`, `gpu` or `cpu`.
+    pub fn parse(name: &str) -> Option<RunOn> {
+        match name {
+            "auto" => Some(RunOn::Auto),
+            "gpu" => Some(RunOn::Gpu),
+            "cpu" => Some(RunOn::Cpu),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            RunOn::Auto => "auto",
+            RunOn::Gpu => "gpu",
+            RunOn::Cpu => "cpu",
+        }
+    }
+}
+
 /// A loaded denoise model: what runs tiles, and a self-check.
 pub(crate) trait Model: Send + Sync {
-    fn runner(&self) -> &dyn TileRunner;
-    /// Check it does something sensible: the test's result, or why not.
-    fn self_test(&self) -> Result<Value, String>;
-    /// How many tiles to run at once when `wanted` threads may be used (a graphics card is kept busy by a few).
-    fn parallel(&self, wanted: usize) -> usize {
-        wanted
-    }
-    /// Where the tiles run: `{kind: "gpu", adapter, tileMs}`, `{kind: "cpu", reason?}` or `{kind: "pending"}` (not
-    /// decided yet). Never starts anything.
-    fn device(&self) -> Value {
+    /// What runs a photo's tiles, and how many to run at once, when `threads` may be used and the setting is `run_on`
+    /// (a graphics card is kept busy by a few). The first time the card may be used it is set up and checked here.
+    fn runner(&self, run_on: RunOn, threads: usize) -> (&dyn TileRunner, usize);
+    /// Check it does something sensible: the test's result, or why not. Unless `run_on` is the processor the graphics
+    /// card is set up and checked too, and the result says where the work will run.
+    fn self_test(&self, run_on: RunOn) -> Result<Value, String>;
+    /// Where the tiles run: `{kind: "gpu", adapter}`, `{kind: "cpu", reason?}` or `{kind: "pending"}` (the card is not
+    /// set up yet), with the card's and the processor's time for the check tile (`cardMs`, `cpuMs`) once both were
+    /// timed. Never starts anything.
+    fn device(&self, _run_on: RunOn) -> Value {
         json!({"kind": "cpu"})
     }
-    /// Whether the user wants the graphics card used (the setting; the runner still checks the card can be).
-    fn use_gpu(&self, _on: bool) {}
 }
 
 /// Loads the model at a path as its manifest describes it.
@@ -81,97 +112,238 @@ pub(crate) type Loader = Arc<dyn Fn(&Path, &DenoiserManifest) -> Result<Arc<dyn 
 /// Tiles run at once on a graphics card: enough to keep it fed while others are packed and blended.
 #[cfg(feature = "denoise")]
 const GPU_PARALLEL: usize = 4;
-/// How far the GPU's answer on the test tile may be from the CPU's (of the answer's largest value) before it is not used.
+/// How far the GPU's answer on the check tile may be from the CPU's (of the answer's largest value) before it is not used.
 #[cfg(feature = "denoise")]
 const GPU_AGREE: f32 = 1e-3;
+/// Longest the card may take to set up (build its kernels, run the check tile, time it) before the processor does the
+/// work instead.
+#[cfg(feature = "denoise")]
+const GPU_SETUP_LIMIT: Duration = Duration::from_secs(30);
+/// Tiles the card may get wrong (an error, numbers that are not finite) before it stops being used for the model.
+#[cfg(feature = "denoise")]
+const GPU_MAX_FALLBACKS: usize = 3;
+/// The file beside a model while the graphics card is set up for it (see [`set_up_card`]).
+pub(crate) const GPU_SETUP_MARKER: &str = "gpu-setup.marker";
+/// Why the card is not tried when a set-up marker is found.
+#[cfg(feature = "denoise")]
+const GPU_CRASHED: &str = "LightCraft closed while it was setting up the graphics card for AI Denoise last time";
+/// Why the card is not used when its set-up ran out of time (the start of it).
+#[cfg(feature = "denoise")]
+const GPU_SLOW: &str = "setting up the graphics card took longer than";
+/// Why the card is not used while a set-up that ran out of time is still going.
+#[cfg(feature = "denoise")]
+const GPU_STUCK: &str = "the graphics card is still setting up from before (it took too long)";
 
-/// The model on the CPU (tract), and on the graphics card when there is one that can run it: the card is set up on the
-/// first tile, checked against the CPU's answer on a test tile, and used while it keeps working; a tile it fails is run
-/// on the CPU, so a photo is always finished.
+/// A set-up that may work another time (a crash, the time limit), unlike one the card or the model cannot do.
+#[cfg(feature = "denoise")]
+fn worth_retrying(why: &str) -> bool {
+    why == GPU_CRASHED || why == GPU_STUCK || why.starts_with(GPU_SLOW)
+}
+
+/// The model on the CPU (tract), and on the graphics card when there is one that can run it: the card is set up for the
+/// first photo that may use it, checked against the CPU's answer on a check tile and timed against it, and used while
+/// it keeps working; a tile it gets wrong is run on the CPU, so a photo is always finished.
 #[cfg(feature = "denoise")]
 struct Tract {
     cpu: lightcraft_denoise::runtime::TractRunner,
     path: PathBuf,
     tile: usize,
     gpu: OnceLock<Result<GpuSide, String>>,
-    /// The setting: the card may be used.
-    gpu_on: AtomicBool,
-    /// Tiles the card failed and the CPU ran.
+    /// Tiles the card got wrong (an error, numbers that are not finite) and the CPU ran.
     fallbacks: AtomicUsize,
+    /// Tiles at once of the photo started last (0: none yet), to say where the work runs.
+    last_threads: AtomicUsize,
 }
 
 #[cfg(feature = "denoise")]
 struct GpuSide {
-    runner: lightcraft_gpu::nn::NetRunner,
+    runner: Box<dyn TileRunner + Send>,
     adapter: String,
-    /// Median milliseconds for one tile on the test tile.
-    tile_ms: f64,
+    /// The check tile on the card, the fastest of a few runs (ms).
+    card_ms: f64,
+    /// The check tile on the CPU, on one thread (ms).
+    cpu_ms: f64,
 }
 
+/// Whether the card (`card_ms` a tile) is faster than the CPU running `threads` tiles at once, from the CPU's time for
+/// one tile alone (`cpu_ms`). Tiles at once share the memory and the cores' second threads, so each one more counts as
+/// half a tile's speed: on a 16-core laptop one tile alone took 1.4 s and sixteen at once finished one every 0.2 s.
+#[cfg(feature = "denoise")]
+fn card_is_faster(card_ms: f64, cpu_ms: f64, threads: usize) -> bool {
+    let at_once = 1.0 + 0.5 * threads.saturating_sub(1) as f64;
+    card_ms.is_finite() && card_ms <= cpu_ms / at_once
+}
+
+/// Card set-ups of this process that have not finished, by marker (their markers are not a crash's).
+#[cfg(feature = "denoise")]
+static SETTING_UP: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Removes a set-up's marker when the set-up ends, however it ends — but not when the process dies inside the driver.
+#[cfg(feature = "denoise")]
+struct SetUpEnded(PathBuf);
+
+#[cfg(feature = "denoise")]
+impl Drop for SetUpEnded {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        SETTING_UP.lock().unwrap_or_else(PoisonError::into_inner).retain(|m| m != &self.0);
+    }
+}
+
+/// Set the graphics card up with `card` on a thread of its own while `meanwhile` runs here, and give up on the card when
+/// it takes longer than `limit` (a driver building kernels for minutes, or stuck). The `marker` file exists while `card`
+/// runs: one found before it starts was left by a LightCraft that closed during a set-up (a driver crash takes the app
+/// with it), so the card is not tried again until the user chooses where denoise runs (`denoise.settings {runOn}`).
+#[cfg(feature = "denoise")]
+fn set_up_card<T: Send + 'static, R>(
+    marker: &Path,
+    limit: Duration,
+    card: impl FnOnce() -> Result<T, String> + Send + 'static,
+    meanwhile: impl FnOnce() -> R,
+) -> Result<(T, R), String> {
+    let ended = {
+        let mut running = SETTING_UP.lock().unwrap_or_else(PoisonError::into_inner);
+        if running.iter().any(|m| m == marker) {
+            return Err(GPU_STUCK.into());
+        }
+        if marker.exists() {
+            return Err(GPU_CRASHED.into());
+        }
+        let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        // a marker that cannot be written only loses the crash guard
+        let _ = std::fs::write(marker, format!("setting up the graphics card for AI Denoise (unix time {secs})\n"));
+        running.push(marker.to_path_buf());
+        SetUpEnded(marker.to_path_buf())
+    };
+    let started = std::time::Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("denoise-gpu-setup".into())
+        .stack_size(STACK)
+        .spawn(move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(card)).unwrap_or_else(|_| Err("the GPU runner gave up".into()));
+            drop(ended);
+            let _ = tx.send(r);
+        })
+        .map_err(|e| format!("could not start setting up the graphics card: {e}"))?;
+    let here = meanwhile();
+    match rx.recv_timeout(limit.saturating_sub(started.elapsed())) {
+        Ok(r) => r.map(|t| (t, here)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!("{GPU_SLOW} {} s, so it is not used", limit.as_secs_f64())),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("the GPU runner gave up".into()),
+    }
+}
+
+/// The card's time for one tile once it is warm: the fastest of up to three runs, stopping after about two seconds (a
+/// slow card is slow enough to tell at once).
+#[cfg(feature = "denoise")]
+fn card_tile_ms(runner: &dyn TileRunner, input: &[f32]) -> f64 {
+    if runner.run(input).is_err() {
+        return f64::INFINITY;
+    }
+    let began = std::time::Instant::now();
+    let mut best = f64::INFINITY;
+    for _ in 0..3 {
+        let one = std::time::Instant::now();
+        if runner.run(input).is_err() {
+            break;
+        }
+        best = best.min(one.elapsed().as_secs_f64() * 1000.0);
+        if began.elapsed() > Duration::from_secs(2) {
+            break;
+        }
+    }
+    best
+}
+
+/// Set the card up for the model at `path`: kernels built, the check tile run on both and compared, both timed.
 #[cfg(feature = "denoise")]
 fn make_gpu(cpu: &lightcraft_denoise::runtime::TractRunner, path: &Path, tile: usize) -> Result<GpuSide, String> {
-    let net = lightcraft_denoise::onnx::read(path).map_err(|e| format!("the model has layers the GPU runner does not do ({e})"))?;
-    let runner = lightcraft_gpu::nn::runner(&net, tile)?;
-    let (input, _) = lightcraft_denoise::runtime::test_tile(tile);
-    let want = cpu.run(&input).map_err(|e| format!("the CPU could not check the GPU: {e}"))?;
-    let got = runner.run(&input).map_err(|e| format!("the GPU could not run the test tile: {e}"))?;
+    let input = Arc::new(lightcraft_denoise::runtime::check_tile(tile));
+    let (on_card, model) = (input.clone(), path.to_path_buf());
+    let card = move || -> Result<_, String> {
+        let net = lightcraft_denoise::onnx::read(&model).map_err(|e| format!("the model has layers the GPU runner does not do ({e})"))?;
+        let runner = lightcraft_gpu::nn::runner(&net, tile)?;
+        let got = runner.run(&on_card).map_err(|e| format!("the GPU could not run the check tile: {e}"))?;
+        let card_ms = card_tile_ms(&runner, &on_card);
+        Ok((runner, got, card_ms))
+    };
+    let on_cpu = || {
+        let started = std::time::Instant::now();
+        (cpu.run(&input), started.elapsed().as_secs_f64() * 1000.0)
+    };
+    let ((runner, got, card_ms), (want, cpu_ms)) = set_up_card(&path.with_file_name(GPU_SETUP_MARKER), GPU_SETUP_LIMIT, card, on_cpu)?;
+    let want = want.map_err(|e| format!("the CPU could not check the GPU: {e}"))?;
     let scale = want.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-12);
     let worst = want.iter().zip(&got).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
     if got.len() != want.len() || !got.iter().all(|v| v.is_finite()) || worst > GPU_AGREE {
-        return Err(format!("its answer on the test tile is not the CPU's (off by {worst:.1e} of the largest value): not used"));
+        return Err(format!("its answer on the check tile is not the CPU's (off by {worst:.1e} of the largest value): not used"));
     }
-    // a card that has been idle runs slowly for its first few tiles: the speed is what it settles at
-    for _ in 0..6 {
-        let _ = runner.run(&input);
-    }
-    let mut times: Vec<f64> = (0..5)
-        .map(|_| {
-            let started = std::time::Instant::now();
-            let _ = runner.run(&input);
-            started.elapsed().as_secs_f64() * 1000.0
-        })
-        .collect();
-    times.sort_by(f64::total_cmp);
-    let tile_ms = times.get(times.len() / 2).copied().unwrap_or(0.0);
-    Ok(GpuSide { adapter: runner.adapter(), tile_ms, runner })
+    Ok(GpuSide { adapter: runner.adapter(), runner: Box::new(runner), card_ms, cpu_ms })
 }
 
 #[cfg(feature = "denoise")]
 impl Tract {
-    /// The card's runner once set up (setting it up on first use), or `None` when it cannot or may not be used.
-    fn gpu_side(&self) -> Option<&GpuSide> {
-        self.gpu
-            .get_or_init(|| {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make_gpu(&self.cpu, &self.path, self.tile)))
-                    .unwrap_or_else(|_| Err("the GPU runner gave up".into()))
-            })
-            .as_ref()
-            .inspect_err(|why| log::info!("denoise: running on the CPU ({why})"))
-            .ok()
+    /// The card when it can be used now, else why not. `start` sets it up when that has not been tried yet; without it
+    /// nothing is started.
+    fn card(&self, start: bool) -> Result<&GpuSide, String> {
+        let side = if start {
+            Some(self.gpu.get_or_init(|| {
+                let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make_gpu(&self.cpu, &self.path, self.tile)))
+                    .unwrap_or_else(|_| Err("the GPU runner gave up".into()));
+                if let Err(why) = &made {
+                    log::info!("denoise: running on the CPU ({why})");
+                }
+                made
+            }))
+        } else {
+            self.gpu.get()
+        };
+        let g = match side {
+            None => return Err("the graphics card is not set up yet".into()),
+            Some(Err(why)) => return Err(why.clone()),
+            Some(Ok(g)) => g,
+        };
+        if let Some(why) = lightcraft_gpu::nn::broken_reason() {
+            return Err(format!("the graphics card stopped working ({why})"));
+        }
+        if self.fallbacks.load(Ordering::Relaxed) >= GPU_MAX_FALLBACKS {
+            return Err(format!("{} got {GPU_MAX_FALLBACKS} tiles wrong", g.adapter));
+        }
+        Ok(g)
     }
 
-    fn gpu_wanted(&self) -> bool {
-        self.gpu_on.load(Ordering::Relaxed)
+    /// The card, when a photo made `threads` tiles at a time under `run_on` runs on it; else why the CPU does.
+    fn choose(&self, run_on: RunOn, threads: usize, start: bool) -> Result<&GpuSide, String> {
+        if run_on == RunOn::Cpu {
+            return Err("the processor is chosen in Settings".into());
+        }
+        let g = self.card(start)?;
+        if run_on == RunOn::Auto && !card_is_faster(g.card_ms, g.cpu_ms, threads) {
+            return Err(format!("it is faster than {} on this computer", g.adapter));
+        }
+        Ok(g)
     }
 
-    fn using_gpu(&self) -> bool {
-        self.gpu_wanted() && self.gpu_side().is_some() && lightcraft_gpu::nn::broken_reason().is_none()
+    fn fell_back(&self, why: &str) {
+        let n = self.fallbacks.fetch_add(1, Ordering::Relaxed) + 1;
+        if n == 1 {
+            log::warn!("denoise: a tile came back wrong from the GPU ({why}); the CPU runs it");
+        } else if n == GPU_MAX_FALLBACKS {
+            log::warn!("denoise: the GPU got {n} tiles wrong; the CPU does the rest");
+        }
     }
 }
 
+/// The card, with the CPU running any tile it gets wrong. Handed out only for photos that run on the card.
 #[cfg(feature = "denoise")]
 impl TileRunner for Tract {
     fn run(&self, input: &[f32]) -> Result<Vec<f32>, RunError> {
-        if self.gpu_wanted()
-            && let Some(g) = self.gpu_side()
-        {
+        if let Ok(g) = self.card(false) {
             match g.runner.run(input) {
-                Ok(out) => return Ok(out),
-                Err(e) => {
-                    if self.fallbacks.fetch_add(1, Ordering::Relaxed) == 0 {
-                        log::warn!("denoise: a tile failed on the GPU ({e}); the CPU runs it");
-                    }
-                }
+                Ok(out) if out.iter().all(|v| v.is_finite()) => return Ok(out),
+                Ok(_) => self.fell_back("numbers that are not finite"),
+                Err(e) => self.fell_back(&e.to_string()),
             }
         }
         self.cpu.run(input)
@@ -180,11 +352,16 @@ impl TileRunner for Tract {
 
 #[cfg(feature = "denoise")]
 impl Model for Tract {
-    fn runner(&self) -> &dyn TileRunner {
-        self
+    fn runner(&self, run_on: RunOn, threads: usize) -> (&dyn TileRunner, usize) {
+        let threads = threads.max(1);
+        self.last_threads.store(threads, Ordering::Relaxed);
+        match self.choose(run_on, threads, true) {
+            Ok(_) => (self, threads.min(GPU_PARALLEL)),
+            Err(_) => (&self.cpu, threads),
+        }
     }
 
-    fn self_test(&self) -> Result<Value, String> {
+    fn self_test(&self, run_on: RunOn) -> Result<Value, String> {
         let t = self.cpu.self_test();
         if !t.ok {
             let failed: Vec<&str> = t.checks.iter().filter(|(_, ok)| !*ok).map(|(c, _)| c.as_str()).collect();
@@ -192,35 +369,35 @@ impl Model for Tract {
         }
         let mut v = serde_json::to_value(&t).map_err(|e| e.to_string())?;
         // the card is set up and checked here, so the test says where the work will run
-        if self.gpu_wanted() {
-            let _ = self.gpu_side();
+        if run_on != RunOn::Cpu {
+            let _ = self.card(true);
         }
         if let Some(o) = v.as_object_mut() {
-            o.insert("device".into(), self.device());
+            o.insert("device".into(), self.device(run_on));
         }
         Ok(v)
     }
 
-    fn parallel(&self, wanted: usize) -> usize {
-        if self.using_gpu() { wanted.min(GPU_PARALLEL) } else { wanted }
-    }
-
-    fn device(&self) -> Value {
-        if !self.gpu_wanted() {
-            return json!({"kind": "cpu", "reason": "the graphics card is turned off in Settings"});
+    fn device(&self, run_on: RunOn) -> Value {
+        if run_on != RunOn::Cpu && self.gpu.get().is_none() {
+            return json!({"kind": "pending"});
         }
-        match self.gpu.get() {
-            None => json!({"kind": "pending"}),
-            Some(Ok(g)) => match lightcraft_gpu::nn::broken_reason() {
-                None => json!({"kind": "gpu", "adapter": g.adapter, "tileMs": g.tile_ms, "fellBack": self.fallbacks.load(Ordering::Relaxed)}),
-                Some(why) => json!({"kind": "cpu", "reason": format!("the graphics card stopped working ({why})")}),
-            },
-            Some(Err(why)) => json!({"kind": "cpu", "reason": why}),
+        let threads = match self.last_threads.load(Ordering::Relaxed) {
+            0 => Pace::Full.parallel(std::thread::available_parallelism().map_or(1, |n| n.get()), None),
+            n => n,
+        };
+        let mut v = match self.choose(run_on, threads, false) {
+            Ok(g) => json!({"kind": "gpu", "adapter": g.adapter}),
+            // a set-up that crashed or ran out of time can be tried again (`denoise.settings {runOn}`)
+            Err(why) => json!({"kind": "cpu", "retry": worth_retrying(&why), "reason": why}),
+        };
+        if let (Some(Ok(g)), Some(o)) = (self.gpu.get(), v.as_object_mut()) {
+            // measured on this computer, on the check tile: the card's best run, and one tile alone on the CPU
+            o.insert("cardMs".into(), json!(g.card_ms));
+            o.insert("cpuMs".into(), json!(g.cpu_ms));
+            o.insert("fellBack".into(), json!(self.fallbacks.load(Ordering::Relaxed)));
         }
-    }
-
-    fn use_gpu(&self, on: bool) {
-        self.gpu_on.store(on, Ordering::Relaxed);
+        v
     }
 }
 
@@ -235,8 +412,8 @@ pub(crate) fn default_loader() -> Loader {
                 path: path.to_path_buf(),
                 tile: manifest.tile as usize,
                 gpu: OnceLock::new(),
-                gpu_on: AtomicBool::new(true),
                 fallbacks: AtomicUsize::new(0),
+                last_threads: AtomicUsize::new(0),
             }) as Arc<dyn Model>)
         })
     }
@@ -265,7 +442,9 @@ pub(crate) struct Settings {
     pub cache_gb: Option<u32>,
     /// Most tiles run at once (`None`: by how hard the pump says to work).
     pub threads: Option<u32>,
-    /// Use the graphics card when there is one that can run the model (`None`: yes).
+    /// Where the model runs: `auto`, `gpu` or `cpu` (`None` or anything else: `auto`; see [`RunOn`]).
+    pub run_on: Option<String>,
+    /// What came before `runOn`: `false` was the processor only.
     pub gpu: Option<bool>,
 }
 
@@ -274,8 +453,12 @@ impl Settings {
         self.auto.unwrap_or(true)
     }
 
-    pub fn gpu(&self) -> bool {
-        self.gpu.unwrap_or(true)
+    pub fn run_on(&self) -> RunOn {
+        match self.run_on.as_deref().and_then(RunOn::parse) {
+            Some(r) => r,
+            None if self.gpu == Some(false) => RunOn::Cpu,
+            None => RunOn::Auto,
+        }
     }
 
     pub fn cache_bytes(&self) -> u64 {
@@ -352,6 +535,14 @@ pub(crate) fn installed_models(dir: &Path) -> Vec<Installed> {
     }
     out.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
     out
+}
+
+/// Forget that setting the graphics card up for a model closed LightCraft before (the markers [`set_up_card`] leaves):
+/// the user chose where denoise runs, so the card may be tried again.
+pub(crate) fn forget_gpu_set_ups(dir: &Path) {
+    for i in installed_models(dir) {
+        let _ = std::fs::remove_file(i.onnx.with_file_name(GPU_SETUP_MARKER));
+    }
 }
 
 /// The model in use.
@@ -440,8 +631,8 @@ pub(crate) struct JobSpec {
     pub loader: Loader,
     /// Tiles run at once.
     pub parallel: usize,
-    /// The graphics card may be used (the setting).
-    pub gpu: bool,
+    /// Where the model runs (the setting).
+    pub run_on: RunOn,
 }
 
 /// Why a product was not made.
@@ -536,13 +727,13 @@ pub(crate) fn make_product(spec: &JobSpec, progress: Option<&Progress>) -> Resul
     }
     let decoded = began.elapsed();
     let model = loaded(spec)?;
-    model.use_gpu(spec.gpu);
+    let (runner, parallel) = model.runner(spec.run_on, spec.parallel.max(1));
     let params = Params {
         tile: spec.manifest.tile as usize,
         overlap: spec.manifest.overlap as usize,
         gain: spec.manifest.gain,
         clip: Some(CLIP),
-        parallel: model.parallel(spec.parallel.max(1)).max(1),
+        parallel: parallel.max(1),
     };
     let report = |done: usize, total: usize| {
         if let Some(p) = progress {
@@ -558,7 +749,7 @@ pub(crate) fn make_product(spec: &JobSpec, progress: Option<&Progress>) -> Resul
         .thread_name(|i| format!("denoise-{i}"))
         .build()
         .map_err(|e| MakeError::Failed(format!("could not start the worker threads: {e}")))?;
-    let rgb = pool.install(|| denoise_bayer(&mosaic.data, mosaic.width, mosaic.height, layout, model.runner(), &params, &ctl))?;
+    let rgb = pool.install(|| denoise_bayer(&mosaic.data, mosaic.width, mosaic.height, layout, runner, &params, &ctl))?;
     drop(mosaic);
     if cancelled() {
         return Err(MakeError::Cancelled);
@@ -745,10 +936,7 @@ impl Session {
     pub(crate) fn denoise_device(&self) -> Value {
         let loaded = self.denoise.active.as_ref().and_then(|a| a.model.lock().unwrap_or_else(PoisonError::into_inner).clone());
         match loaded {
-            Some(m) => {
-                m.use_gpu(self.denoise.settings.gpu());
-                m.device()
-            }
+            Some(m) => m.device(self.denoise.settings.run_on()),
             None => json!({"kind": "none"}),
         }
     }
@@ -966,7 +1154,7 @@ impl Session {
             model: active.model.clone(),
             loader: self.denoise.loader.clone(),
             parallel,
-            gpu: self.denoise.settings.gpu(),
+            run_on: self.denoise.settings.run_on(),
         })
     }
 
@@ -1209,9 +1397,17 @@ mod gpu_tests {
     use super::*;
     use lightcraft_denoise::manifest::{Domain, Gain};
 
-    /// The model file is read again when the card is set up (on the first tile), so it stays until the test ends.
-    fn model(tile: u64) -> (Arc<dyn Model>, lightcraft_denoise::runtime::TractRunner, PathBuf) {
-        let path = std::env::temp_dir().join(format!("lc-engine-gpu-{}-{tile}.onnx", std::process::id()));
+    /// A folder of the test's own: the card's set-up leaves its marker beside the model.
+    fn folder(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lc-engine-gpu-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The model file is read again when the card is set up (for the first photo), so it stays until the test ends.
+    fn model(name: &str, tile: u64) -> (Arc<dyn Model>, lightcraft_denoise::runtime::TractRunner, PathBuf) {
+        let path = folder(name).join("model.onnx");
         std::fs::write(&path, lightcraft_denoise::synthetic::unet_onnx(tile, 8, 2, 7)).unwrap();
         let manifest = DenoiserManifest {
             id: "synthetic".into(),
@@ -1232,42 +1428,202 @@ mod gpu_tests {
         (loaded, cpu, path)
     }
 
+    fn worst(want: &[f32], got: &[f32]) -> f32 {
+        assert_eq!(want.len(), got.len());
+        let scale = want.iter().fold(1e-9f32, |m, v| m.max(v.abs()));
+        want.iter().zip(got).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / scale
+    }
+
     #[test]
     fn a_tile_on_the_card_is_the_cpus_tile() {
-        let (model, cpu, path) = model(32);
-        model.use_gpu(true);
+        let (model, cpu, path) = model("same", 32);
         let (input, _) = lightcraft_denoise::runtime::test_tile(32);
         let want = cpu.run(&input).unwrap();
-        let got = model.runner().run(&input).unwrap();
-        let scale = want.iter().fold(1e-9f32, |m, v| m.max(v.abs()));
-        let worst = want.iter().zip(&got).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
-        assert_eq!(want.len(), got.len());
-        assert!(worst < 1e-3, "off by {worst:e}");
-        let device = model.device();
+        let (runner, at_once) = model.runner(RunOn::Gpu, 16);
+        assert!(worst(&want, &runner.run(&input).unwrap()) < 1e-3);
+        let device = model.device(RunOn::Gpu);
         eprintln!("device: {device}");
         match device["kind"].as_str() {
             Some("gpu") => {
                 assert!(device["adapter"].as_str().is_some_and(|a| !a.is_empty()));
-                assert!(model.parallel(16) <= GPU_PARALLEL, "a card is fed by a few tiles at once");
+                assert!(at_once <= GPU_PARALLEL, "a card is fed by a few tiles at once");
+                assert!(device["cardMs"].as_f64().is_some_and(|ms| ms > 0.0) && device["cpuMs"].as_f64().is_some_and(|ms| ms > 0.0), "{device}");
             }
-            Some("cpu") => assert!(device["reason"].as_str().is_some_and(|r| !r.is_empty()), "the CPU is only used for a reason: {device}"),
-            other => panic!("the first tile decides where the work runs, not {other:?}"),
+            Some("cpu") => {
+                assert!(device["reason"].as_str().is_some_and(|r| !r.is_empty()), "the CPU is only used for a reason: {device}");
+                assert_eq!(at_once, 16);
+            }
+            other => panic!("the first photo decides where the work runs, not {other:?}"),
         }
-        let _ = std::fs::remove_file(&path);
+        assert!(!path.with_file_name(GPU_SETUP_MARKER).exists(), "a set-up that ended leaves no marker");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
-    fn with_the_card_turned_off_everything_runs_on_the_cpu() {
-        let (model, cpu, path) = model(32);
-        model.use_gpu(false);
+    fn with_the_processor_chosen_everything_runs_on_the_cpu() {
+        let (model, cpu, path) = model("cpu", 32);
         let (input, _) = lightcraft_denoise::runtime::test_tile(32);
-        let got = model.runner().run(&input).unwrap();
-        assert_eq!(got, cpu.run(&input).unwrap(), "the CPU path is the CPU runner, bit for bit");
-        assert_eq!(model.device()["kind"], "cpu");
-        assert_eq!(model.parallel(16), 16, "the threads asked for are the threads used");
-        // turned back on, the card is used again (when there is one)
-        model.use_gpu(true);
-        assert_ne!(model.device()["reason"], "the graphics card is turned off in Settings");
-        let _ = std::fs::remove_file(&path);
+        let (runner, at_once) = model.runner(RunOn::Cpu, 16);
+        assert_eq!(runner.run(&input).unwrap(), cpu.run(&input).unwrap(), "the CPU path is the CPU runner, bit for bit");
+        assert_eq!(at_once, 16, "the threads asked for are the threads used");
+        assert_eq!(model.device(RunOn::Cpu)["kind"], "cpu");
+        assert_eq!(model.device(RunOn::Auto)["kind"], "pending", "the card was not even set up");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_card_is_used_where_it_is_faster_than_the_processor() {
+        // measured: a tile alone on one CPU thread 1.4 s; an RTX 4090 Laptop 13 ms; a Radeon 610M 490 ms
+        for threads in [1, 2, 8, 16, 64] {
+            assert!(card_is_faster(13.0, 1400.0, threads), "a big card wins at {threads}");
+        }
+        assert!(card_is_faster(490.0, 1400.0, 2), "a small card beats the two threads background work gets");
+        assert!(!card_is_faster(490.0, 1400.0, 16), "and loses to sixteen");
+        assert!(!card_is_faster(f64::INFINITY, 1400.0, 1) && !card_is_faster(f64::NAN, 1400.0, 1), "a card that never ran is never faster");
+        assert!(!card_is_faster(10.0, 0.0, 1));
+    }
+
+    /// A card that gives numbers that are not finite.
+    struct Garbage(AtomicUsize);
+
+    impl TileRunner for Garbage {
+        fn run(&self, input: &[f32]) -> Result<Vec<f32>, RunError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            let n = input.len() / 4 * 12;
+            Ok(vec![f32::NAN; n])
+        }
+    }
+
+    #[test]
+    fn a_tile_the_card_gets_wrong_is_run_on_the_processor_and_three_stop_the_card() {
+        let (_, cpu, path) = model("garbage", 32);
+        let card = GpuSide { runner: Box::new(Garbage(AtomicUsize::new(0))), adapter: "Test card".into(), card_ms: 1.0, cpu_ms: 1000.0 };
+        let model = Tract {
+            cpu: cpu.clone(),
+            path: path.clone(),
+            tile: 32,
+            gpu: OnceLock::from(Ok(card)),
+            fallbacks: AtomicUsize::new(0),
+            last_threads: AtomicUsize::new(0),
+        };
+        let (input, _) = lightcraft_denoise::runtime::test_tile(32);
+        let want = cpu.run(&input).unwrap();
+        let (runner, at_once) = model.runner(RunOn::Auto, 8);
+        assert_eq!(at_once, GPU_PARALLEL, "the (fast) card is chosen");
+        for _ in 0..GPU_MAX_FALLBACKS {
+            assert_eq!(runner.run(&input).unwrap(), want, "a wrong tile is the CPU's tile");
+        }
+        let device = model.device(RunOn::Auto);
+        assert_eq!(device["kind"], "cpu", "{device}");
+        assert!(device["reason"].as_str().unwrap().contains("tiles wrong"), "{device}");
+        assert_eq!(device["fellBack"], GPU_MAX_FALLBACKS);
+        let (_, at_once) = model.runner(RunOn::Gpu, 8);
+        assert_eq!(at_once, 8, "the next photo runs on the CPU, even with the card chosen");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_slow_card_is_left_out_unless_it_is_chosen() {
+        let (_, cpu, path) = model("slow", 32);
+        let slow = GpuSide { runner: Box::new(cpu.clone()), adapter: "Slow card".into(), card_ms: 490.0, cpu_ms: 1400.0 };
+        let model = Tract {
+            cpu,
+            path: path.clone(),
+            tile: 32,
+            gpu: OnceLock::from(Ok(slow)),
+            fallbacks: AtomicUsize::new(0),
+            last_threads: AtomicUsize::new(0),
+        };
+        assert_eq!(model.runner(RunOn::Auto, 16).1, 16, "sixteen threads beat it");
+        let device = model.device(RunOn::Auto);
+        assert_eq!((device["kind"].as_str(), device["reason"].as_str()), (Some("cpu"), Some("it is faster than Slow card on this computer")));
+        assert_eq!(device["cardMs"], 490.0, "the times measured are reported");
+        assert_eq!(device["retry"], false, "trying again would not make it faster");
+        assert_eq!(model.runner(RunOn::Auto, 2).1, GPU_PARALLEL.min(2), "two threads do not");
+        assert_eq!(model.device(RunOn::Auto)["kind"], "gpu");
+        assert_eq!(model.runner(RunOn::Gpu, 16).1, GPU_PARALLEL, "chosen, it is used anyway");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_set_up_marker_left_behind_keeps_the_card_off() {
+        let (model, _, path) = model("crashed", 32);
+        let marker = path.with_file_name(GPU_SETUP_MARKER);
+        std::fs::write(&marker, "setting up the graphics card for AI Denoise (unix time 0)").unwrap();
+        let (_, at_once) = model.runner(RunOn::Gpu, 4);
+        assert_eq!(at_once, 4, "the CPU does the work");
+        let device = model.device(RunOn::Gpu);
+        assert_eq!((device["kind"].as_str(), device["reason"].as_str()), (Some("cpu"), Some(GPU_CRASHED)), "{device}");
+        assert_eq!(device["retry"], true, "the interface offers to try again");
+        assert!(marker.exists(), "it stays until the user chooses where denoise runs");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_set_up_runs_beside_the_cpu_and_removes_its_marker() {
+        let dir = folder("setup");
+        let marker = dir.join(GPU_SETUP_MARKER);
+        let seen = Arc::new(AtomicBool::new(false));
+        let (m, s) = (marker.clone(), seen.clone());
+        let r = set_up_card(
+            &marker,
+            Duration::from_secs(10),
+            move || {
+                s.store(m.exists(), Ordering::Relaxed);
+                Ok(7)
+            },
+            || "cpu",
+        );
+        assert_eq!(r, Ok((7, "cpu")));
+        assert!(seen.load(Ordering::Relaxed), "the marker is there while the card is set up");
+        assert!(!marker.exists(), "and gone after");
+        // a set-up that fails or panics removes it too
+        assert_eq!(set_up_card(&marker, Duration::from_secs(10), || Err::<(), _>("no card".into()), || ()), Err("no card".into()));
+        assert!(!marker.exists());
+        let r = set_up_card(&marker, Duration::from_secs(10), || -> Result<(), String> { panic!("driver") }, || ());
+        assert!(r.is_err() && !marker.exists(), "{r:?}");
+        // a marker found before the set-up starts means the last one took LightCraft down: the card is not touched
+        std::fs::write(&marker, "left behind").unwrap();
+        let touched = Arc::new(AtomicBool::new(false));
+        let t = touched.clone();
+        let r = set_up_card(
+            &marker,
+            Duration::from_secs(10),
+            move || {
+                t.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+            || (),
+        );
+        assert_eq!(r, Err(GPU_CRASHED.to_string()));
+        assert!(!touched.load(Ordering::Relaxed) && marker.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_set_up_that_takes_too_long_is_given_up_on() {
+        let dir = folder("slowsetup");
+        let marker = dir.join(GPU_SETUP_MARKER);
+        let started = std::time::Instant::now();
+        let slow = || -> Result<(), String> {
+            std::thread::sleep(Duration::from_millis(600));
+            Ok(())
+        };
+        let r = set_up_card(&marker, Duration::from_millis(50), slow, || ());
+        assert!(r.as_ref().is_err_and(|e| e.contains("took longer") && worth_retrying(e)), "{r:?}");
+        assert!(started.elapsed() < Duration::from_millis(500), "the caller does not wait for the card");
+        // while the first is still stuck, another set-up of the same model does not start a second one
+        let again = set_up_card(&marker, Duration::from_secs(5), || Ok(()), || ());
+        assert!(again.is_err_and(|e| e.contains("still setting up") && worth_retrying(&e)));
+        // once it ends its marker goes, and the card can be set up again
+        while marker.exists() {
+            assert!(started.elapsed() < Duration::from_secs(10), "the stuck set-up ended");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        while SETTING_UP.lock().unwrap().iter().any(|m| m == &marker) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(set_up_card(&marker, Duration::from_secs(5), || Ok(1), || 2), Ok((1, 2)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
