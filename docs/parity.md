@@ -26,7 +26,7 @@ and prints the summary; `cargo xtask parity --write` refreshes the summary table
 | C. Views & navigation (VIEW) | 16 | 0 | 1 | 0 | 9/9 (100%) | 4/4 (100%) |
 | D. Search & filter (FILT) | 11 | 1 | 1 | 0 | 4/4 (100%) | 4/4 (100%) |
 | E. Metadata (META) | 5 | 1 | 0 | 0 | 2/2 (100%) | 2/2 (100%) |
-| F. Edit panel — global adjustments (EDIT) | 42 | 1 | 5 | 1 | 28/28 (100%) | 13/14 (93%) |
+| F. Edit panel — global adjustments (EDIT) | 42 | 2 | 4 | 1 | 28/28 (100%) | 13/14 (93%) |
 | G. Profiles (PROF) | 6 | 2 | 3 | 0 | 3/4 (75%) | 2/3 (67%) |
 | H. Crop & rotate (CROP) | 9 | 0 | 0 | 1 | 6/6 (100%) | 3/3 (100%) |
 | I. Remove / healing (REM) | 7 | 1 | 2 | 2 | 4/4 (100%) | 2/3 (67%) |
@@ -48,9 +48,9 @@ and prints the summary; `cargo xtask parity --write` refreshes the summary table
 | Y. Menus | 81 | 0 | 4 | 8 | 47/47 (100%) | 23/23 (100%) |
 | Z. Keyboard shortcuts (desktop) | 74 | 3 | 3 | 1 | 49/52 (94%) | 22/23 (96%) |
 | Lightroom Classic extras | 31 | 10 | 39 | 9 | — | 21/22 (95%) |
-| **Total** | 387 | 34 | 86 | 37 | 194/200 (97%) | 139/149 (93%) |
+| **Total** | 387 | 35 | 85 | 37 | 194/200 (97%) | 139/149 (93%) |
 
-Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **79.7%** of 507 in-scope rows — P0 98.5% of 200 · P1 95.6% of 149 · P2 40.8% of 158.
+Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **79.8%** of 507 in-scope rows — P0 98.5% of 200 · P1 95.6% of 149 · P2 41.1% of 158.
 <!-- /parity:summary -->
 
 ## Top gaps
@@ -68,9 +68,13 @@ Take the first one nobody is working on.
 4. **LR-BEHAV-RENDER-FIDELITY** (P1): a side-by-side fidelity suite against Lightroom renders (kept local in `plan/`),
    then tune tone, highlights, texture/clarity/dehaze, NR and sharpening against it.
 5. **LR-EDIT-OPTICS-PROFILE** (P1): a lens-profile database of our own (embedded DNG/maker corrections work today).
-6. **AI masks and Enhance** (LR-MASK-SUBJECT / SKY / PEOPLE / OBJECTS, LR-EDIT-DETAIL-DENOISE, SUPERRES, LENSBLUR):
+6. **AI masks and Enhance** (LR-MASK-SUBJECT / SKY / PEOPLE / OBJECTS, SUPERRES, LENSBLUR):
    blocked on a model strategy (permissively licensed weights or our own training, pure-Rust inference). A maintainer
    decision, not just engineering.
+   **AI Denoise** (LR-EDIT-DETAIL-DENOISE, 🟡) now works end to end for Bayer raws with an opt-in download (non-destructive:
+   a slider plus a regenerable cache, never DNG files; docs/denoise.md). Its only real model's weights are GPL-3.0, so the
+   remaining work is: a model of our own training on the CC0 / CC BY RawNIND data (a maintainer decision), a linear-RGB
+   contract for X-Trans and phone DNGs, a GPU path and a fidelity comparison with Lightroom.
 7. **HDR** (Q. HDR, LR-EXP-HDR), **video** (R. Video), **Classic output modules** (Map view, Book, Slideshow module,
    Print, publish): large, well understood, lower priority than 1–5.
 
@@ -247,7 +251,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-EDIT-DETAIL-SHARPEN | Sharpening | P0 | ✅ | `ctl:detail.sharpenAmount`, `ctl:detail.sharpenRadius`, `ctl:detail.sharpenDetail`, `ctl:detail.sharpenMasking` | no Alt-drag mask preview |
 | LR-EDIT-DETAIL-NR | Luminance noise reduction | P0 | ✅ | `ctl:detail.nrLuminance`, `ctl:detail.nrDetail`, `ctl:detail.nrContrast` | |
 | LR-EDIT-DETAIL-CNR | Colour noise reduction | P0 | ✅ | `ctl:detail.nrColor`, `ctl:detail.nrColorDetail`, `ctl:detail.nrColorSmoothness` | |
-| LR-EDIT-DETAIL-DENOISE | AI denoise | P2 | ⬜ | | settings field reserved, not rendered |
+| LR-EDIT-DETAIL-DENOISE | AI denoise | P2 | 🟡 | `ctl:enhance.denoise`, `cmd:denoise.models.list`, `cmd:denoise.models.install`, `cmd:denoise.models.download`, `cmd:denoise.models.downloads`, `cmd:denoise.models.downloadCancel`, `cmd:denoise.models.test`, `cmd:denoise.models.remove`, `cmd:denoise.models.select`, `cmd:denoise.settings`, `cmd:denoise.queue`, `cmd:denoise.cancel`, `cmd:denoise.status`, `cmd:denoise.pump`, `cmd:denoise.clear`, `crates/denoise/src/lib.rs`, `crates/engine/src/denoise.rs`, `crates/ui-egui/src/panels/denoise.rs` | Non-destructive: the Detail ▸ Denoise slider is an ordinary develop setting (the Amount, 0–100) that mixes a cleaned picture into the raw before any other edit; the cleaned picture is cache data made in the background by an AI model run on the CPU (tract) and kept in `<library>/denoise/` (content-keyed, size-limited, regenerable) — never a DNG or any file in the library; exports make it themselves and fail loudly if they cannot (docs/denoise.md). Opt-in model (RawNIND UtNet2, Bayer, 31 MB; GPL-3.0 weights, downloaded after its terms, never bundled — a maintainer decision) or your own `.onnx` with a `denoise-model.json`. Bayer raws only (X-Trans, demosaiced DNGs and non-raw photos keep the normal NR); 8–15 s a 12–24 MP photo on 32 cores; no GPU path; not compared with Lightroom's result |
 | LR-EDIT-DETAIL-RAWDETAILS | Improved demosaic toggle | P2 | ⬜ | | |
 | LR-EDIT-DETAIL-SUPERRES | Super resolution | P2 | ⬜ | | |
 | LR-EDIT-DETAIL-AISHARPEN | AI sharpen | OOS | 🚫 | | |

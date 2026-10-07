@@ -289,7 +289,7 @@ LightCraft is young and moving fast. **Where we honestly stand** (details in the
 - **The biggest gaps:**
   - **camera colour calibration:** raws other than DNG develop with a neutral colour matrix today, so colour is muted;
   - **CR3 and compressed Fujifilm / Olympus raws:** these open as embedded previews only;
-  - **AI masks and denoise:** subject and sky selection are classical heuristics;
+  - **AI masks:** subject and sky selection are classical heuristics; **AI Denoise** works on Bayer raws with a model you download ([docs/denoise.md](docs/denoise.md));
   - **HDR, video and the Classic Print / Book / Map modules.**
 - **What's next:** see [where we're going](ROADMAP.md#where-were-going).
 
@@ -304,7 +304,7 @@ LightCraft is young and moving fast. **Where we honestly stand** (details in the
 | Camera colour: DNG files use their own matrices | ✅ · our own calibration for other raws ⬜ (top priority; neutral fallback today) |
 | Native macOS menu bar (generated from the command registry), control channel + every widget addressable, headless UI snapshots | ✅ |
 | RAW: DNG, CR2, ARW, NEF (uncompressed + lossless/lossy compressed), Fujifilm RAF (uncompressed, Bayer + X-Trans), Panasonic RW2, Pentax PEF, Olympus ORF (uncompressed); embedded previews for every format incl. CR3 | ✅ · CR3, compressed RAF/ORF decode ⬜ |
-| Detail: sharpening, luminance + colour noise reduction | ✅ · AI Denoise, Super Resolution ⬜ |
+| Detail: sharpening, luminance + colour noise reduction, AI Denoise (non-destructive; Bayer raws, opt-in model) | ✅ · AI Denoise for X-Trans and phone DNGs, Super Resolution ⬜ |
 | Remove / Heal / Clone spots (auto source), Visualize Spots, Red Eye and Pet Eye (auto pupil detection, catchlight) | ✅ · content-aware fill, spot pin editing 🚧 |
 | Export: JPEG / PNG / TIFF / WebP / AVIF / DNG / original, sizing, file-size limit, output sharpening, naming templates, batch, metadata policy, text or image watermark | ✅ · HDR export ⬜ |
 | Library persistence (crash-safe op log + snapshots, background compaction, failed saves reported), disk thumbnail cache | ✅ |
@@ -314,7 +314,7 @@ LightCraft is young and moving fast. **Where we honestly stand** (details in the
 | Optics (distortion, vignetting, auto + manual CA, defringe, DNG-embedded lens corrections), Geometry (transforms, Constrain Crop), Upright (Auto/Level/Vertical/Full/Guided) | ✅ · camera lens profiles (our own) ⬜ |
 | Photo Merge: HDR (auto-align, deghost), Panorama (spherical/cylindrical/perspective, boundary warp, auto crop), HDR Panorama → DNG | ✅ |
 | GPU pipeline (wgpu compute, CPU-exact within 1/255), CPU fallback on device limits / errors | ✅ · WebGPU in the browser 🚧 |
-| AI: segmentation masks, AI denoise, super resolution, faces; HDR editing; video | ⬜ (see [roadmap](ROADMAP.md#where-were-going)) |
+| AI: segmentation masks, super resolution; HDR editing; video | ⬜ (see [roadmap](ROADMAP.md#where-were-going)) · faces and AI Denoise 🚧 (opt-in models) |
 | Web build (same UI in the browser via WASM): persistent library in OPFS/IndexedDB, Web Worker rendering, export downloads | ✅ · WebGPU, Safari/Firefox testing 🚧 |
 
 <sub>✅ works today · 🚧 in progress · ⬜ not started</sub>

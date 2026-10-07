@@ -25,7 +25,7 @@ duplicate Local entries #22, black GPU exports on an Intel iGPU #78).
 | **Feature checklist** | 79% | P0 core and P1 nearly complete: import (Add / Copy / Move, templates, devices), library, grid/loupe/compare/survey, every Edit slider, curves, colour grading, masking tools, crop/Upright, heal/clone, presets/profiles, versions/history, sync, export, menus, shortcuts | P1: lens-profile database, content-aware fill (patch synthesis), video playback/trim |
 | **RAW coverage** (formats people shoot) | ~50% | DNG (all kinds), CR2, ARW, NEF (uncompressed + Huffman lossless/lossy), uncompressed RAF/ORF, packed RW2, PEF; every container's embedded preview (incl. CR3) | **CR3** (every Canon since ~2018), compressed RAF/ORF, RW2 v4, Nikon lossy-after-split, Canon sRAW, HEIC/AVIF. Per-model verification is thin (~40 corpus files vs >1,000 models) |
 | **Colour & image quality** | ~55–65% | Pipeline is complete and fast; GPU path CPU-exact within 1/255 | **No measured camera calibration database**: ARW has a guarded per-file embedded-JPEG colour estimate (docs/camera-preview-colour.md); other non-DNG raws and rejected estimates use a neutral matrix. Colour fidelity remains incomplete. No lens-profile database. No measured fidelity against Lightroom (tone, highlights, texture/clarity, NR, sharpening are tuned by eye) |
-| **AI & computational** | ~15–20% | Assisted culling (focus, bursts), auto tone, HDR/panorama merge; subject/sky/background masks as classical heuristics; **faces (MVP, [docs/faces.md](docs/faces.md))**: a bundled pure-Rust detector, opt-in recognition models (one-click download or add a file; they run on the CPU with tract), a background scan that finds and embeds faces, name suggestions, a person's page with look-alike faces to confirm, an Unnamed faces section (look-alikes together, select a group and name it at once) | Real segmentation masks (subject, sky, people, objects, landscape, depth), AI denoise, super resolution, lens blur, generative remove, natural-language search; for faces: clusters with separators between groups, small faces in large photos (the detector looks at 640 px), thresholds calibrated on live faces, writing face regions back to XMP. **Blocked on a model strategy** (licensable weights or our own training; pure-Rust inference is feasible) |
+| **AI & computational** | ~15–20% | Assisted culling (focus, bursts), auto tone, HDR/panorama merge; subject/sky/background masks as classical heuristics; **faces (MVP, [docs/faces.md](docs/faces.md))**: a bundled pure-Rust detector, opt-in recognition models (one-click download or add a file; they run on the CPU with tract), a background scan that finds and embeds faces, name suggestions, a person's page with look-alike faces to confirm, an Unnamed faces section (look-alikes together, select a group and name it at once); **AI Denoise ([docs/denoise.md](docs/denoise.md))**: a non-destructive Amount slider over a regenerable cache (never DNG files), an opt-in model run on the CPU, Bayer raws only | Real segmentation masks (subject, sky, people, objects, landscape, depth), AI denoise for X-Trans and phone DNGs and with a model we can ship (the one it offers has GPL-3.0 weights), super resolution, lens blur, generative remove, natural-language search; for faces: clusters with separators between groups, small faces in large photos (the detector looks at 640 px), thresholds calibrated on live faces, writing face regions back to XMP. **Blocked on a model strategy** (licensable weights or our own training; pure-Rust inference is feasible) |
 | **Workflow & library** | ~85% (single machine) | Robust catalog (journal + snapshots, background compaction, crash-tested), 85k-photo libraries stay responsive, Local browsing with automatic cleanup, XMP interop, keywords, smart albums, Move import | Opening an 85k library takes 1.7–4.7 s; no cloud sync (out of scope), no tablet companion (#74, roadmap), shared albums, publish services, tethering |
 | **Classic modules** | ~30% | Geotagging from GPX track logs, soft proofing (partial), slideshow (basic) | **Map view, Book, Print, Slideshow module, Web, publish services**: ~40 tracker rows ⬜ |
 | **HDR & video** | 0% | | HDR edit/display/export; video play/trim/edit/export |
@@ -39,7 +39,7 @@ duplicate Local entries #22, black GPU exports on an Intel iGPU #78).
 | Nikon / Sony / older-Canon raw shooter | ~65% | Camera colour fidelity and coverage (ARW preview estimates are only a starting point) |
 | Canon CR3 / Fujifilm / Olympus shooter | ~35% | Their raws open as embedded previews only |
 | Lightroom Classic power user | ~45% | Print, Book, Map, publish, tethering |
-| Relies on AI (masks, denoise) | ~25% | No segmentation or AI denoise models |
+| Relies on AI (masks, denoise) | ~25–30% | No segmentation models; AI denoise only on Bayer raws, with a GPL-3.0 model you download |
 
 ## Where we're going
 
@@ -57,7 +57,7 @@ Priorities, in order. Each points at tracker rows in [`docs/parity.md`](docs/par
    (references stay in the local `plan/`), then tune against the numbers.
 5. **Lens profiles of our own** (LR-EDIT-OPTICS-PROFILE, P1).
 6. **AI model strategy** (maintainer decision): which permissively licensed models (or our own training) for
-   segmentation masks and denoise; then pure-Rust inference. Unblocks M12 and Enhance.
+   segmentation masks and denoise (AI Denoise runs today on an opt-in GPL-3.0 model; ours, trained on its CC0 / CC BY data, would replace it); then pure-Rust inference. Unblocks M12 and Enhance.
 7. **Then:** HDR (Q), the Classic output modules (Print first, then Map view, Book, Slideshow), video (R), localisation
    and accessibility.
 
@@ -78,7 +78,7 @@ hardening (#78), copyright metadata (#51), GPX geotagging (#60), import tag help
 | M4 | Crop, geometry, optics | crop tool + overlays, straighten, Upright (auto/level/vertical/full/guided), manual transforms, CA, defringe, manual lens corrections | 6–10 | ✅ |
 | M5 | Performance | source pyramids, wgpu compute pipeline (CPU oracle), draft/full renders, prefetch, budgets (16 ms slider updates on 24 MP) | 10–15 | 🚧 (stage cache, source pyramid, wgpu pipeline, prefetch, memory budget ✅; colour NR at half resolution, GPU histogram ⬜) |
 | M6 | Masking | brush, linear/radial gradients, colour/luminance/depth range, add/subtract/intersect/invert, all local adjustments, masks panel | 8–12 | 🚧 (brush/linear/radial/colour/luminance range, add/subtract/intersect, masks panel ✅; depth range, AI masks ⬜) |
-| M7 | Detail | sharpening + masking preview, luminance/colour NR, Denoise, Raw Details, Super Resolution | 6–10 | 🚧 (sharpening, luminance/colour NR ✅; AI Denoise, Raw Details, Super Resolution ⬜) |
+| M7 | Detail | sharpening + masking preview, luminance/colour NR, Denoise, Raw Details, Super Resolution | 6–10 | 🚧 (sharpening, luminance/colour NR ✅; AI Denoise 🟡 on Bayer raws with an opt-in model; Raw Details, Super Resolution ⬜) |
 | M8 | Heal / Remove | content-aware remove (PatchMatch), heal, clone, brush spots, visualize spots, red/pet eye | 6–10 | 🚧 (heal, clone, auto source, visualize spots, red/pet eye ✅; PatchMatch remove ⬜) |
 | M9 | Presets, profiles, versions, sync | preset browser + amount, create/import presets, profile browser, versions, history, copy/paste/sync settings | 5–8 | ✅ |
 | M10 | Export & share | export dialog (JPEG/PNG/TIFF/DNG/AVIF/JXL/original), sizing, sharpening, metadata, watermark, naming, batch jobs, XMP sidecars, HDR export | 6–10 | 🚧 (all formats incl. DNG/original, sizing, presets, background jobs ✅; JXL encode, HDR export ⬜) |
@@ -149,7 +149,7 @@ The milestone estimates in the table above were made before work started and are
 ## Risks that coding hours alone don't retire
 
 - **AI features** (subject/sky/people masks, generative remove) need model weights with licences we can ship; classical
-  fallbacks first. No permissively licensed sky-segmentation or raw-denoise model was found — we may need to train our own.
+  fallbacks first. No permissively licensed sky-segmentation or raw-denoise model was found — we may need to train our own. (The raw-denoise model we could run, RawNIND’s as packaged for darktable, has GPL-3.0 weights: LightCraft offers it only as an opt-in download; training on its CC0 / CC BY data is the way out.)
 - **Camera colour and lens data** is a data problem: we never use Adobe's matrices, DCPs or LCPs. DNG-embedded data first,
   then our own calibration; long-tail camera/lens coverage grows over time.
 - **Raw-format sources:** decided 2026-10-05: decoders are written from *prose* format descriptions (even ones
