@@ -11,7 +11,7 @@ use lightcraft_pipeline::SourceInfo;
 use lightcraft_raster::Rgb32f;
 use lightcraft_raster::resample::{Filter, fit};
 
-use crate::media::{FileLoader, FileProbe, PreviewLoader, ProbeInfo};
+use crate::media::{DenoiseSpec, FileLoader, FileProbe, PairLoader, PreviewLoader, ProbeInfo};
 
 fn meta_of(m: &lightcraft_meta::Metadata) -> (Meta, Option<String>) {
     let shutter = m.exposure_time.map(|t| if t >= 1.0 { format!("{t:.0}") } else { format!("1/{:.0}", 1.0 / t) }).unwrap_or_default();
@@ -205,22 +205,56 @@ pub fn bin_factor(raw: &lightcraft_raw::RawImage, max_edge: usize) -> Option<usi
 /// instead of each one waking the pool from outside and waiting for it (which costs more than the
 /// loops themselves when the machine is busy).
 pub fn load_bytes(bytes: &[u8], max_edge: usize) -> Result<(Rgb32f, SourceInfo), String> {
-    rayon::scope(|_| load_bytes_now(std::borrow::Cow::Borrowed(bytes), max_edge))
+    rayon::scope(|_| load_bytes_now(std::borrow::Cow::Borrowed(bytes), max_edge, None).map(|(img, _, info)| (img, info)))
 }
 
 /// [`load_bytes`] taking the file's bytes: a raw file's bytes are freed as soon as it is decoded
 /// (less memory held while it is developed).
 pub fn load_vec(bytes: Vec<u8>, max_edge: usize) -> Result<(Rgb32f, SourceInfo), String> {
-    rayon::scope(move |_| load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge))
+    rayon::scope(move |_| load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, None).map(|(img, _, info)| (img, info)))
 }
 
-fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<(Rgb32f, SourceInfo), String> {
+/// [`load_vec`] that also develops the photo's cached denoised picture (`spec`) from the same decode: the plain
+/// picture, the denoised one (`None` when it cannot be read or does not fit this raw: the plain one is then all
+/// there is) and the source facts. Both pictures are the same size.
+pub fn load_vec_pair(bytes: Vec<u8>, max_edge: usize, spec: &DenoiseSpec) -> Result<(Rgb32f, Option<Rgb32f>, SourceInfo), String> {
+    rayon::scope(move |_| load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, Some(spec)))
+}
+
+/// The denoised camera RGB of `raw` from its cached product, as the plain development would have it: the default
+/// crop, and `factor` × `factor` blocks averaged into one pixel when the plain one was binned. `None` when the product
+/// is missing, damaged, made from something else or not the size of this raw's active area.
+fn denoised_camera_rgb(raw: &lightcraft_raw::RawImage, spec: &DenoiseSpec, factor: usize) -> Option<Rgb32f> {
+    use lightcraft_denoise::product::{self, Window};
+    let a = raw.active_area;
+    let header = product::read_header_at(&spec.product).ok()?;
+    if header.key != spec.key || (header.width, header.height) != (a.width, a.height) {
+        return None;
+    }
+    if raw.opcodes.list3.is_empty() {
+        let c = raw.develop_crop(a.width, a.height);
+        let window = Window { x: c.x, y: c.y, width: c.width, height: c.height };
+        product::read_window(&spec.product, &spec.key, Some(window), factor, Some(HIGHLIGHT_CLIP)).ok()
+    } else {
+        // (the plain development is not binned either when the file has opcodes of this kind: `factor` is 1)
+        let whole = product::read(&spec.product, &spec.key, 1).ok()?;
+        Some(raw.finish_demosaiced(whole))
+    }
+}
+
+fn load_bytes_now(
+    bytes: std::borrow::Cow<'_, [u8]>,
+    max_edge: usize,
+    denoise: Option<&DenoiseSpec>,
+) -> Result<(Rgb32f, Option<Rgb32f>, SourceInfo), String> {
     if lightcraft_raw::probe(&bytes).is_some() {
         let mut raw = match lightcraft_raw::decode(&bytes) {
             Ok(r) => r,
             Err(lightcraft_raw::RawError::Unsupported(why)) => {
                 // show the camera's embedded JPEG (rendered, not raw) until the variant is supported
-                return load_embedded_preview(&bytes, max_edge).ok_or(format!("unsupported raw ({why}) without an embedded preview"));
+                return load_embedded_preview(&bytes, max_edge)
+                    .map(|(img, info)| (img, None, info))
+                    .ok_or(format!("unsupported raw ({why}) without an embedded preview"));
             }
             Err(e) => return Err(e.to_string()),
         };
@@ -234,68 +268,70 @@ fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<
         // Previews and thumbnails bin the mosaic straight to (about) the size they need; only
         // larger levels (exports, 1:1) demosaic the whole sensor.
         let t0 = std::time::Instant::now();
-        let binned = match bin_factor(&raw, max_edge) {
+        let bin = bin_factor(&raw, max_edge);
+        let binned = match bin {
             Some(k) => raw.develop_binned(k, HIGHLIGHT_CLIP).map_err(|e| e.to_string())?,
             None => None,
         };
-        let mut img = match binned {
+        let factor = if binned.is_some() { bin.unwrap_or(1) } else { 1 };
+        let img = match binned {
             Some(img) => img,
             None => {
                 let method = if max_edge <= 600 { lightcraft_raw::Method::Bilinear } else { lightcraft_raw::Method::Ahd };
                 raw.develop(method).map_err(|e| e.to_string())?
             }
         };
+        // the same development from the denoised mosaic, when the photo has been denoised
+        let twin = denoise.and_then(|spec| denoised_camera_rgb(&raw, spec, factor)).filter(|d| d.width == img.width && d.height == img.height);
         // the samples aren't needed any more (the colour model below reads only the tags)
         raw.data = lightcraft_raw::RawData::U16(Vec::new());
-        let mut stages = vec![("develop", t0.elapsed())];
-        stages.push(("transform", t0.elapsed()));
-        lightcraft_raw::highlight::reconstruct(&mut img, t.wb, HIGHLIGHT_CLIP);
-        stages.push(("highlights", t0.elapsed()));
+        let wb = t.wb;
         let m = camera_look.map(|p| p.matrix.mul(&t.matrix)).unwrap_or(t.matrix).to_f32();
         let gain = 2f32.powf(t.baseline_exposure as f32);
-        let wb = t.wb;
         // A DNG's own profile look (hue/saturation map, look table), DNG spec chapter 6.
         let tables = lightcraft_raw::profile::ProfileTables::new(&raw.color.profile, lightcraft_raw::color::illuminant_weight(&raw.color, xy));
-        img.map_in_place(|p| {
-            let c = [p[0] * wb[0], p[1] * wb[1], p[2] * wb[2]];
-            let rgb = [
-                m[0][0] * c[0] + m[0][1] * c[1] + m[0][2] * c[2],
-                m[1][0] * c[0] + m[1][1] * c[1] + m[1][2] * c[2],
-                m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
-            ];
-            match &tables {
-                Some(tables) => tables.apply(rgb, gain).map(|v| v.max(0.0)),
-                None => rgb.map(|v| (v * gain).max(0.0)),
-            }
-        });
-        stages.push(("colour", t0.elapsed()));
-        let img = fit(&img, max_edge, max_edge, Filter::Box);
-        stages.push(("fit", t0.elapsed()));
-        let img = img.into_oriented(raw.orientation);
-        stages.push(("orient", t0.elapsed()));
+        // camera RGB → what the pipeline takes: clipped highlights rebuilt, white balance and the colour model applied,
+        // fitted to `max_edge` and upright (the same for the plain and the denoised picture)
+        let finish = |mut img: Rgb32f| -> Rgb32f {
+            lightcraft_raw::highlight::reconstruct(&mut img, wb, HIGHLIGHT_CLIP);
+            img.map_in_place(|p| {
+                let c = [p[0] * wb[0], p[1] * wb[1], p[2] * wb[2]];
+                let rgb = [
+                    m[0][0] * c[0] + m[0][1] * c[1] + m[0][2] * c[2],
+                    m[1][0] * c[0] + m[1][1] * c[1] + m[1][2] * c[2],
+                    m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
+                ];
+                match &tables {
+                    Some(tables) => tables.apply(rgb, gain).map(|v| v.max(0.0)),
+                    None => rgb.map(|v| (v * gain).max(0.0)),
+                }
+            });
+            let img = fit(&img, max_edge, max_edge, Filter::Box);
+            img.into_oriented(raw.orientation)
+        };
+        let develop_ms = t0.elapsed();
+        let img = finish(img);
+        let twin = twin.map(finish);
         if lightcraft_pipeline::profiling() {
-            let mut prev = std::time::Duration::ZERO;
-            let parts: Vec<String> = stages
-                .iter()
-                .map(|(n, t)| {
-                    let d = *t - prev;
-                    prev = *t;
-                    format!("{n} {:.1}", d.as_secs_f64() * 1e3)
-                })
-                .collect();
-            eprintln!("[profile] raw source {}×{} (max {max_edge}, ms after decode): {}", img.width, img.height, parts.join(", "));
+            let finish_ms = (t0.elapsed() - develop_ms).as_secs_f64() * 1e3;
+            eprintln!(
+                "[profile] raw source {}×{} (max {max_edge}): develop {:.1} ms, finish {finish_ms:.1} ms (after decode)",
+                img.width,
+                img.height,
+                develop_ms.as_secs_f64() * 1e3
+            );
         }
         let (temp, tint) = xy_to_temp_tint(xy);
         let relative = raw.format == lightcraft_raw::RawFormat::Arw && t.matrix_is_fallback;
         let camera_tone = camera_look.map(|p| p.tone).or_else(|| raw.color.profile.tone_curve.as_ref().and_then(dng_tone_curve));
         let (temp, tint) = if relative { (6500.0, 0.0) } else { (temp.round(), tint.round()) };
-        return Ok((img, SourceInfo { raw: true, as_shot_temp: temp, as_shot_tint: tint, lens, relative_wb: relative, camera_tone }));
+        return Ok((img, twin, SourceInfo { raw: true, as_shot_temp: temp, as_shot_tint: tint, lens, relative_wb: relative, camera_tone }));
     }
     let d = lightcraft_codecs::decode(&bytes, lightcraft_codecs::DecodeOptions::fit(max_edge as u32, max_edge as u32)).map_err(|e| e.to_string())?;
     drop(bytes);
     let img = d.to_working();
     let img = if img.width.max(img.height) > max_edge { fit(&img, max_edge, max_edge, Filter::Mitchell) } else { img };
-    Ok((img.into_oriented(Orientation::from_exif(d.orientation)), SourceInfo::default()))
+    Ok((img.into_oriented(Orientation::from_exif(d.orientation)), None, SourceInfo::default()))
 }
 
 /// A DNG `ProfileToneCurve` (linear in, linear out, 1.0 = white after exposure compensation) as the
@@ -363,6 +399,21 @@ pub fn fs_preview_loader() -> PreviewLoader {
     })
 }
 
+/// The filesystem-backed [`PairLoader`]: the file is read and decoded once, and developed as usual and from the photo's
+/// denoised picture. It holds two pictures at once, so it counts for more at the memory gate than a plain load.
+pub fn fs_pair_loader() -> PairLoader {
+    Arc::new(|path: &str, max_edge: usize, spec: &DenoiseSpec| {
+        let len = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+        let weight = len * if max_edge <= crate::media::SourceLevel::Thumb.max_edge() { 4 } else { 10 };
+        let gate = crate::memory::work_gate();
+        let _permit = if crate::memory::is_background() { gate.acquire(weight) } else { gate.acquire_urgent(weight) };
+        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let r = load_vec_pair(bytes, max_edge, spec);
+        crate::memory::release();
+        r
+    })
+}
+
 /// Filesystem-backed hooks (native). On the web the host installs bytes-based hooks instead.
 ///
 /// Their working memory is bounded by [`crate::memory::work_gate`]: background loads (grid
@@ -398,6 +449,7 @@ impl crate::Session {
         self.media.file_loader = Some(l);
         self.media.file_probe = Some(p);
         self.media.preview_loader = Some(fs_preview_loader());
+        self.media.denoise.loader = Some(fs_pair_loader());
         self
     }
 }

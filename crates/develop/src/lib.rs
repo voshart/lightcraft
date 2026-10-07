@@ -66,6 +66,13 @@ impl DevelopSettings {
         !self.disabled_sections.iter().any(|s| s == section)
     }
 
+    /// How much of the AI-denoised picture to mix in, 0 (none) to 1 (all of it): the Denoise amount, unless the Detail
+    /// section is switched off or the value is not a number.
+    pub fn denoise_amount(&self) -> f32 {
+        let a = self.enhance.denoise;
+        if a.is_finite() && self.section_enabled("detail") { (a / 100.0).clamp(0.0, 1.0) as f32 } else { 0.0 }
+    }
+
     pub fn set_section_enabled(&mut self, section: &str, on: bool) {
         self.disabled_sections.retain(|s| s != section);
         if !on {
@@ -164,5 +171,30 @@ mod tests {
         assert_eq!(s.disabled_sections.len(), 1);
         s.set_section_enabled("effects", true);
         assert!(s.section_enabled("effects"));
+    }
+
+    #[test]
+    fn the_denoise_amount_is_a_slider_and_follows_the_detail_section() {
+        let mut s = DevelopSettings::default();
+        assert_eq!(s.denoise_amount(), 0.0);
+        assert!(controls::set(&mut s, "enhance.denoise", 60.0));
+        assert_eq!(controls::get(&s, "enhance.denoise"), Some(60.0));
+        assert!((s.denoise_amount() - 0.6).abs() < 1e-6);
+        // the slider's range is 0 to 100; values outside it are brought in
+        controls::set(&mut s, "enhance.denoise", 500.0);
+        assert_eq!(s.denoise_amount(), 1.0);
+        controls::set(&mut s, "enhance.denoise", -5.0);
+        assert_eq!(s.denoise_amount(), 0.0);
+        // switching the Detail section off switches the denoise off with it; a settings file with a bad number does nothing
+        controls::set(&mut s, "enhance.denoise", 80.0);
+        s.set_section_enabled("detail", false);
+        assert_eq!(s.denoise_amount(), 0.0);
+        s.set_section_enabled("detail", true);
+        s.enhance.denoise = f64::NAN;
+        assert_eq!(s.denoise_amount(), 0.0);
+        // it is part of Detail: a reset of the section clears it
+        controls::set(&mut s, "enhance.denoise", 40.0);
+        s.reset_section(Section::Detail);
+        assert_eq!(s.enhance.denoise, 0.0);
     }
 }

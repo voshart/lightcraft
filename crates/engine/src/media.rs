@@ -71,6 +71,37 @@ pub type FileLoader = Arc<dyn Fn(&str, usize) -> Result<(Rgb32f, SourceInfo), St
 /// `max_edge` (set by the app). `None`: no usable preview.
 pub type PreviewLoader = Arc<dyn Fn(&str, usize) -> Option<Rgba8> + Send + Sync>;
 
+/// A raw photo's cached AI-denoised picture (see [`crate::denoise`]): where the file is and the key it must have been
+/// made with. A file that is missing, damaged or made for something else is a cache miss, never an error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DenoiseSpec {
+    pub product: std::path::PathBuf,
+    pub key: String,
+}
+
+/// Decodes a raw file once and develops it twice: as usual, and from the denoised picture in `spec` when that can be
+/// read (`None` when it cannot). Both are at most `max_edge` long and the same size.
+pub type PairLoader = Arc<dyn Fn(&str, usize, &DenoiseSpec) -> Result<(Rgb32f, Option<Rgb32f>, SourceInfo), String> + Send + Sync>;
+
+/// A photo's denoised picture next to its plain one, and the last mix of the two that was asked for.
+pub struct Twin {
+    pub image: Arc<Rgb32f>,
+    /// The Amount (in thousandths) and the picture mixed for it, so dragging other sliders keeps one source picture.
+    mix: std::sync::Mutex<Option<(u32, Arc<Rgb32f>)>>,
+}
+
+impl Twin {
+    pub fn new(image: Arc<Rgb32f>) -> Twin {
+        Twin { image, mix: std::sync::Mutex::new(None) }
+    }
+
+    /// Bytes held, the last mix included.
+    fn bytes(&self) -> usize {
+        let mixed = self.mix.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map_or(0, |m| m.1.data.len() * 12);
+        self.image.data.len() * 12 + mixed
+    }
+}
+
 /// Pixels and the source interpretation learned while decoding; they must be cached together.
 #[derive(Clone)]
 pub struct DecodedSource {
@@ -79,11 +110,45 @@ pub struct DecodedSource {
     /// A smart preview's stored camera tone curve: the one decoder fact its pixels need that the
     /// catalog's header facts lack (used when `info` is `None`).
     pub camera_tone: Option<lightcraft_pipeline::tone::CameraTone>,
+    /// The same picture developed from the AI-denoised mosaic, when the photo has one cached.
+    pub denoised: Option<Arc<Twin>>,
 }
 
 impl DecodedSource {
     pub fn new(image: Arc<Rgb32f>, info: Option<SourceInfo>) -> Self {
-        DecodedSource { image, info, camera_tone: None }
+        DecodedSource { image, info, camera_tone: None, denoised: None }
+    }
+
+    /// The picture to develop for a Denoise `amount` (0 to 1, see [`DevelopSettings::denoise_amount`]): the plain one,
+    /// the denoised one, or a mix of the two. A mix is made once per amount and kept, so the stages after it are
+    /// reused until the amount changes.
+    pub fn image_for(&self, amount: f32) -> Arc<Rgb32f> {
+        let Some(twin) = &self.denoised else { return self.image.clone() };
+        if amount.is_nan() || amount <= 0.0 || twin.image.width != self.image.width || twin.image.height != self.image.height {
+            return self.image.clone();
+        }
+        if amount >= 1.0 {
+            return twin.image.clone();
+        }
+        let thousandths = (amount * 1000.0).round().clamp(1.0, 999.0) as u32;
+        let mut memo = twin.mix.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((t, img)) = memo.as_ref()
+            && *t == thousandths
+        {
+            return img.clone();
+        }
+        let mut mixed = (*self.image).clone();
+        if !lightcraft_denoise::product::blend(&mut mixed, &twin.image, thousandths as f32 / 1000.0) {
+            return self.image.clone();
+        }
+        let mixed = Arc::new(mixed);
+        *memo = Some((thousandths, mixed.clone()));
+        mixed
+    }
+
+    /// Bytes held: the picture, its denoised twin and the last mix.
+    pub fn bytes(&self) -> usize {
+        self.image.data.len() * 12 + 64 + std::mem::size_of::<SourceInfo>() + self.denoised.as_ref().map_or(0, |t| t.bytes())
     }
 
     /// What to render these pixels against: the decoder's facts, else `header` (the catalog's)
@@ -107,6 +172,8 @@ pub enum SourceRef {
         /// The photo's smart preview, used when the original can't be read (offline drive). The
         /// UI thread never checks whether the original is there; the render worker finds out.
         fallback: Option<std::path::PathBuf>,
+        /// The photo has a cached denoised picture: load it with the plain one (see [`PairLoader`]).
+        denoise: Option<(DenoiseSpec, PairLoader)>,
     },
     /// A smart preview standing in for a missing original.
     Smart {
@@ -123,10 +190,24 @@ impl SourceRef {
         let image = match self {
             SourceRef::Loaded(a) => return Ok((**a).clone()),
             SourceRef::Demo { scene, max_edge } => Arc::new(scene.render_fit(*max_edge)),
-            SourceRef::File { path, max_edge, loader, fallback } => {
-                let r = match loader {
+            SourceRef::File { path, max_edge, loader, fallback, denoise } => {
+                let plain = || match loader {
                     Some(l) => l(path, *max_edge).map(|(image, info)| DecodedSource::new(Arc::new(image), Some(info))),
                     None => Err(format!("no decoder available for {path}")),
+                };
+                // the denoised picture comes with the plain one from a single decode; when it cannot be read the
+                // pair loader gives the plain picture alone (the cached file is never a reason to fail a render)
+                let r = match denoise {
+                    Some((spec, pair)) => match pair(path, *max_edge, spec) {
+                        Ok((image, twin, info)) => Ok(DecodedSource {
+                            image: Arc::new(image),
+                            info: Some(info),
+                            camera_tone: None,
+                            denoised: twin.map(|t| Arc::new(Twin::new(Arc::new(t)))),
+                        }),
+                        Err(e) => Err(e),
+                    },
+                    None => plain(),
                 };
                 // An offline original renders from its smart preview (no decoder facts: header ones).
                 return match (r, fallback) {
@@ -169,6 +250,54 @@ pub struct MediaCache {
     scenes: Vec<lightcraft_scenes::Scene>,
     /// Rendered thumbnails (memory, plus disk once a library is attached).
     pub rendered: Arc<PreviewCache>,
+    /// Which photos have a cached denoised picture, and how to read it.
+    pub denoise: DenoiseIndex,
+}
+
+/// The photos that have a cached denoised picture for the denoise model in use. Only memory: nothing here touches the
+/// file system, so it can be asked on the UI thread.
+#[derive(Default)]
+pub struct DenoiseIndex {
+    ready: std::collections::HashMap<PhotoId, DenoiseSpec>,
+    /// Reads the pictures (`None`: this build cannot, and nothing is ever ready).
+    pub loader: Option<PairLoader>,
+}
+
+impl DenoiseIndex {
+    /// What to load for `id` besides its plain picture, and how.
+    pub fn get(&self, id: PhotoId) -> Option<(&DenoiseSpec, &PairLoader)> {
+        self.ready.get(&id).zip(self.loader.as_ref())
+    }
+
+    pub fn spec(&self, id: PhotoId) -> Option<&DenoiseSpec> {
+        self.ready.get(&id)
+    }
+
+    pub fn set(&mut self, id: PhotoId, spec: DenoiseSpec) {
+        self.ready.insert(id, spec);
+    }
+
+    pub fn remove(&mut self, id: PhotoId) -> bool {
+        self.ready.remove(&id).is_some()
+    }
+
+    pub fn clear(&mut self) {
+        self.ready.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.ready.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ready.is_empty()
+    }
+
+    pub fn ids(&self) -> Vec<PhotoId> {
+        let mut v: Vec<PhotoId> = self.ready.keys().copied().collect();
+        v.sort();
+        v
+    }
 }
 
 impl Default for MediaCache {
@@ -188,6 +317,7 @@ impl Default for MediaCache {
             availability: Default::default(),
             scenes: Vec::new(),
             rendered: Arc::new(PreviewCache::memory(rendered_budget(budget))),
+            denoise: DenoiseIndex::default(),
         }
     }
 }
@@ -195,10 +325,6 @@ impl Default for MediaCache {
 /// Memory for rendered previews out of the cache share.
 fn rendered_budget(share: usize) -> usize {
     RENDERED_MEM_BYTES.min(share / 4)
-}
-
-fn source_bytes(img: &Rgb32f) -> usize {
-    img.data.len() * 12 + 64 + std::mem::size_of::<SourceInfo>()
 }
 
 impl MediaCache {
@@ -249,8 +375,8 @@ impl MediaCache {
             let Some((tick, which)) = candidates.into_iter().flatten().min() else { break };
             let freed = match which {
                 0 => self.thumbs.pop_oldest(),
-                1 => self.previews.iter().position(|e| e.2 == tick).map(|i| source_bytes(&self.previews.remove(i).1.image)),
-                2 => self.full.take().map(|e| source_bytes(&e.1.image)),
+                1 => self.previews.iter().position(|e| e.2 == tick).map(|i| self.previews.remove(i).1.bytes()),
+                2 => self.full.take().map(|e| e.1.bytes()),
                 _ => self.rendered.evict_oldest(),
             };
             match freed {
@@ -302,7 +428,7 @@ impl MediaCache {
         let tick = lightcraft_preview::next_tick();
         match level {
             SourceLevel::Thumb => {
-                let cost = source_bytes(&img.image);
+                let cost = img.bytes();
                 self.thumbs.insert(id, img, cost);
             }
             SourceLevel::Preview => {
@@ -336,12 +462,31 @@ impl MediaCache {
     /// Decoded sources held: (thumbnail level, preview level, full size).
     pub fn usage(&self) -> (crate::memory::Usage, crate::memory::Usage, crate::memory::Usage) {
         use crate::memory::Usage;
-        let previews = Usage::new(self.previews.len(), self.previews.iter().map(|e| source_bytes(&e.1.image)).sum());
-        let full = self.full.as_ref().map(|e| Usage::new(1, source_bytes(&e.1.image))).unwrap_or_default();
+        let previews = Usage::new(self.previews.len(), self.previews.iter().map(|e| e.1.bytes()).sum());
+        let full = self.full.as_ref().map(|e| Usage::new(1, e.1.bytes())).unwrap_or_default();
         (Usage::new(self.thumbs.len(), self.thumbs.cost()), previews, full)
     }
 
+    /// What a render of photo `id` with settings `s` adds to its identity for the denoised picture it will use: 0 unless
+    /// it uses one (the Denoise amount is above 0 and the photo has a cached denoised picture).
+    pub fn denoise_salt(&self, id: PhotoId, s: &DevelopSettings) -> u64 {
+        match self.denoise.spec(id) {
+            Some(spec) if s.denoise_amount() > 0.0 => Hasher128::new().str(&spec.key).finish().0 as u64 | 1,
+            _ => 0,
+        }
+    }
+
+    /// How to load photo `p` at `level`: from the cache when its source is there, else from its file (with its denoised
+    /// picture beside it when it has one), its smart preview or the demo scene.
     pub fn source_ref(&mut self, p: &Photo, level: SourceLevel) -> SourceRef {
+        let mut r = self.source_ref_plain(p, level);
+        if let (SourceRef::File { denoise, .. }, Some((spec, loader))) = (&mut r, self.denoise.get(p.id)) {
+            *denoise = Some((spec.clone(), loader.clone()));
+        }
+        r
+    }
+
+    fn source_ref_plain(&mut self, p: &Photo, level: SourceLevel) -> SourceRef {
         if let Some(a) = self.get_source(p.id, level) {
             return SourceRef::Loaded(Box::new(a));
         }
@@ -380,10 +525,12 @@ impl MediaCache {
                 }
                 match self.scenes.iter().find(|s| s.id == *scene) {
                     Some(s) => SourceRef::Demo { scene: Box::new(s.clone()), max_edge },
-                    None => SourceRef::File { path: format!("demo:{scene}"), max_edge, loader: None, fallback: None },
+                    None => SourceRef::File { path: format!("demo:{scene}"), max_edge, loader: None, fallback: None, denoise: None },
                 }
             }
-            Source::File { path } => SourceRef::File { path: path.clone(), max_edge, loader: self.file_loader.clone(), fallback: None },
+            Source::File { path } => {
+                SourceRef::File { path: path.clone(), max_edge, loader: self.file_loader.clone(), fallback: None, denoise: None }
+            }
         }
     }
 }
@@ -485,7 +632,8 @@ impl RenderJob {
         let was_loaded = matches!(self.source, SourceRef::Loaded(_));
         match self.source.load_source() {
             Ok(source) => {
-                let src = &source.image;
+                // the plain picture, or (Denoise amount above 0 and a denoised picture cached) the mix the amount asks for
+                let src = &source.image_for(self.settings.denoise_amount());
                 let info = source.info_or(self.info);
                 // Thumbnails (many small jobs side by side) stay on the CPU; views and exports use
                 // the GPU when there is one.
@@ -639,16 +787,24 @@ impl crate::Session {
         // share a result (a view slot showing photo A would otherwise look current for photo B)
         // …and so is the file's content: a file changed on disk (Reload) renders afresh
         let content = Hasher128::new().str(&content_key(&p)).finish().0 as u64;
+        // …and whether it is rendered from the photo's denoised picture, which may arrive after the first render
+        let salt = self.media.denoise_salt(id, &settings);
         let key = settings.hash64()
             ^ ((max_w as u64) << 40)
             ^ ((max_h as u64) << 20)
             ^ (apply_crop as u64)
             ^ (level as u64) << 60
             ^ id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            ^ content.rotate_left(17);
+            ^ content.rotate_left(17)
+            ^ salt;
         let cache = thumb_bucket.map(|b| {
-            let k = Hasher128::new().str(&content_key(&p)).u64(settings.hash64()).u64(b as u64).u64(RENDER_CACHE_VERSION).finish();
-            (self.media.rendered.clone(), k)
+            let mut h = Hasher128::new();
+            h.str(&content_key(&p)).u64(settings.hash64()).u64(b as u64).u64(RENDER_CACHE_VERSION);
+            // (only a render that uses a denoised picture has it in its key, so every other thumbnail stays valid)
+            if salt != 0 {
+                h.u64(salt);
+            }
+            (self.media.rendered.clone(), h.finish())
         });
         Some(RenderJob {
             photo: id,
@@ -917,6 +1073,7 @@ mod tests {
                 Ok((image, info))
             })),
             fallback: None,
+            denoise: None,
         };
         job.info = SourceInfo::default(); // Header facts cannot override decoder facts.
         job.settings = Arc::new(DevelopSettings::default());

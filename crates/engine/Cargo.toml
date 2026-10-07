@@ -11,6 +11,8 @@ workspace = true
 [features]
 # Run installed face recognition models (the tract runtime). Off in the web build.
 recognition = ["lightcraft-faces/tract"]
+# Run installed AI denoise models (the tract runtime, shared with `recognition`). Off in the web build.
+denoise = ["lightcraft-denoise/tract"]
 
 [dependencies]
 lightcraft-geom = { workspace = true }
@@ -27,6 +29,7 @@ lightcraft-codecs = { workspace = true }
 lightcraft-raw = { workspace = true }
 lightcraft-meta = { workspace = true }
 lightcraft-faces = { workspace = true }
+lightcraft-denoise = { workspace = true }
 miniz_oxide = { workspace = true }
 lightcraft-merge = { workspace = true }
 rayon = { workspace = true }

@@ -2378,6 +2378,7 @@ dependencies = [
  "lightcraft-catalog",
  "lightcraft-codecs",
  "lightcraft-color",
+ "lightcraft-denoise",
  "lightcraft-develop",
  "lightcraft-faces",
  "lightcraft-geom",
