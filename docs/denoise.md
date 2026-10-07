@@ -121,7 +121,7 @@ kernels, and activations kept in as few buffers as the network's lifetimes allow
 DX12, Vulkan or Metal; the device is a separate one from the interactive renders (they share the switches and the crash
 sentinel: `LIGHTCRAFT_GPU=0`, `LIGHTCRAFT_GPU_BACKEND`, the GPU rendering preference).
 
-Measured on an NVIDIA GeForce RTX 4090 Laptop GPU (the only adapter tried so far), release build, the real model:
+Measured on an NVIDIA GeForce RTX 4090 Laptop GPU (the main adapter tried; a second, small one is below), release build, the real model:
 
 | | |
 |---|---|
@@ -213,11 +213,17 @@ and the web build) has no runner: the commands say so and the slider stays out o
 
 - **Bayer raws only.** X-Trans (Fujifilm), Foveon, already demosaiced DNGs and non-raw photos keep their normal noise
   reduction. A *linear* (demosaiced RGB) model would cover those and DNGs from phones; the contract does not have it yet.
-- **The graphics card is tried on one adapter.** Everything above about the card is measured on one NVIDIA laptop GPU.
-  AMD, Intel and Apple GPUs, integrated GPUs and Vulkan or Metal on other drivers are untested; the check against the
-  CPU and the per-tile fallback are what keep an untested card from doing harm, not evidence that it is fast. An
-  integrated GPU with a couple of compute units may be no faster than the CPU (the set-up check reports its time per
-  tile, but nothing switches back to the CPU for being slow: turn the card off in Settings).
+- **The graphics card is tried on two adapters, both on Windows with DX12.** An NVIDIA RTX 4090 Laptop GPU (also on
+  Vulkan) and the small AMD Radeon 610M (2 compute units) built into the same laptop's CPU. Both give tract's answer to
+  1.6 × 10⁻⁶ of the largest value. Intel and Apple GPUs, Vulkan or Metal on other drivers, and macOS and Linux generally
+  are untested; the check against the CPU and the per-tile fallback are what keep an untested card from doing harm, not
+  evidence that it works or is fast.
+- **A small card is slower than a big processor, and nothing switches away from it.** The Radeon 610M takes 485–494 ms
+  a tile: about 3× faster than one CPU core (1.46 s) but about 2.5× slower than this machine's whole 16-core CPU
+  (about 0.19 s a tile at its best), so a 24 MP photo would take about 17 s on it against about 7 s on the processor.
+  The runner asks for the high-performance adapter (here the NVIDIA one), but on a machine whose only GPU is an integrated
+  one the card is used while the checkbox is on, even where the processor would be faster. The set-up already runs a
+  tile on both, so comparing them is free; it is not done yet.
 - **tract stays the processor path** and the reference. The existing pure-Rust GPU ONNX runtime, wonnx, is archived and has
   no transposed convolution or depth-to-space (per the operator table on its repository page, October 2026), so the runner is ours:
   `lightcraft_gpu::nn`, driven by a plain description of the network (`lightcraft_denoise::net`) read from the ONNX file.

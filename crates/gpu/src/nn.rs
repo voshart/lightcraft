@@ -974,7 +974,7 @@ mod tests {
             (0..4 * tile * tile).map(|i| (0.2 + 0.3 * ((i % tile) as f32 / tile as f32) + 0.1 * (noise[i] - 0.5)).clamp(0.0, 1.0)).collect();
         let t = Instant::now();
         let want = cpu.run(&input).unwrap();
-        println!("tract: {:.0} ms for one tile (all cores)", t.elapsed().as_secs_f64() * 1000.0);
+        println!("tract: {:.0} ms for one tile (one call runs on one core)", t.elapsed().as_secs_f64() * 1000.0);
         let t = Instant::now();
         let got = g.run(&input).unwrap();
         println!("gpu, first tile: {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
