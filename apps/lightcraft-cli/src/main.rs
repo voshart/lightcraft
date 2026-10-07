@@ -596,12 +596,12 @@ fn snapshot(args: &[String]) -> Result<(), String> {
     let t0 = Instant::now();
     let mut session = match &library {
         Some(dir) => {
-            let mut s = Session::new().with_fs().with_default_face_models();
+            let mut s = Session::new().with_fs().with_default_face_models().with_default_denoise_models();
             s.open_library(dir, false).map_err(|e| library_error(dir, e))?;
             s
         }
-        None if files.is_empty() => Session::with_demo().with_fs().with_default_face_models(),
-        None => Session::new().with_fs().with_default_face_models(),
+        None if files.is_empty() => Session::with_demo().with_fs().with_default_face_models().with_default_denoise_models(),
+        None => Session::new().with_fs().with_default_face_models().with_default_denoise_models(),
     };
     if !files.is_empty() {
         let ti = Instant::now();

@@ -581,3 +581,31 @@ fn a_photo_whose_file_changed_has_no_picture_until_it_is_made_again() {
     assert_eq!(x.s.media.denoise_salt(id, &x.s.catalog.photo(id).unwrap().develop), 0);
     let _ = std::fs::remove_dir_all(&x.dir);
 }
+
+#[test]
+fn a_photo_waits_for_its_turn_unless_pictures_are_not_made_on_their_own_or_have_nowhere_to_go() {
+    let mut x = setup("waits", true);
+    let id = photo(&x.s);
+    set_amount(&mut x.s, 80.0);
+    // automatic off: the open photo is left alone until it is asked for
+    x.s.execute("denoise.settings", &json!({"auto": false})).unwrap();
+    assert!(!x.s.denoise_auto());
+    x.s.execute("denoise.pump", &json!({"pace": "full"})).unwrap();
+    assert_eq!(x.s.denoise_photo_state(id), PhotoState::Idle);
+    assert!(!x.s.denoise_busy());
+    x.s.execute("denoise.queue", &json!({"ids": [id.0]})).unwrap();
+    assert!(x.s.denoise_busy(), "queued with a model: the headless runs wait for it");
+    pump_until_ready(&mut x.s, 1);
+    assert_eq!(x.s.denoise_photo_state(id), PhotoState::Ready);
+    assert!(!x.s.denoise_busy());
+    // a session whose library is not on disk has nowhere to keep it: the photo says so instead of waiting for ever
+    x.s.denoise.settings.auto = Some(true);
+    if let Some(l) = x.s.library.as_mut() {
+        l.on_disk = false;
+    }
+    match x.s.denoise_photo_state(id) {
+        PhotoState::Failed { why, unsupported } => assert!(unsupported && why.contains("library folder"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&x.dir);
+}

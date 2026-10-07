@@ -26,8 +26,10 @@ dhat = { workspace = true, optional = true }
 
 [features]
 # Run face recognition models (adds the tract runtime, about 20 MB). On by default; `--no-default-features` is the lite build.
-default = ["recognition"]
+default = ["recognition", "denoise"]
 recognition = ["lightcraft-engine/recognition"]
+# Run AI denoise models (the same tract runtime as `recognition`: no extra size). Off in the lite build.
+denoise = ["lightcraft-engine/denoise"]
 # Heap profiling: `cargo run --release -p lightcraft-cli --features dhat-heap -- snapshot …` counts
 # every allocation (live/peak bytes in `library.memory` / `ui.inspect`) and writes dhat-heap.json
 # (open it in DHAT's viewer: allocation sites by bytes at the peak). Slows allocation-heavy work.

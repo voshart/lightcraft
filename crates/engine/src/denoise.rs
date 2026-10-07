@@ -691,6 +691,12 @@ impl Session {
         if self.denoise.active.is_none() {
             return PhotoState::NoModel;
         }
+        if self.denoise_products_dir().is_none() {
+            return PhotoState::Failed {
+                why: "AI Denoise keeps its pictures in the library folder, and this session has none.".into(),
+                unsupported: true,
+            };
+        }
         if self.media.denoise.spec(id).is_some() {
             return PhotoState::Ready;
         }
@@ -954,6 +960,16 @@ impl Session {
             }
             None => (0, 0),
         }
+    }
+
+    /// Are pictures made without being asked for photos being looked at (Settings ▸ AI Denoise)?
+    pub fn denoise_auto(&self) -> bool {
+        self.denoise.settings.auto()
+    }
+
+    /// Is a picture being made, or waiting for its turn with a model to make it? (Headless runs wait for this.)
+    pub fn denoise_busy(&self) -> bool {
+        self.denoise.running.is_some() || (!self.denoise.queue.is_empty() && self.denoise.active.is_some())
     }
 
     /// Seconds the running job has been going, and its progress.

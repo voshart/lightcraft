@@ -367,6 +367,7 @@ fn services() -> Services {
 fn open_session(in_memory: bool, dir: Option<std::path::PathBuf>, seed_demo: bool) -> (Session, Option<LibraryProblem>) {
     let (mut s, problem) = open_library_session(in_memory, dir, seed_demo);
     s.face_models_dir = lightcraft_engine::config::default_face_models_dir();
+    s.set_denoise_models_dir(lightcraft_engine::config::default_denoise_models_dir());
     (s, problem)
 }
 

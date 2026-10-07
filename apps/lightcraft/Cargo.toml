@@ -11,8 +11,10 @@ workspace = true
 
 [features]
 # Run face recognition models (adds the tract runtime, about 20 MB). On by default; `--no-default-features` is the lite build.
-default = ["recognition"]
+default = ["recognition", "denoise"]
 recognition = ["lightcraft-engine/recognition"]
+# Run AI denoise models (the same tract runtime as `recognition`: no extra size). Off in the lite build.
+denoise = ["lightcraft-engine/denoise"]
 
 [dependencies]
 lightcraft-engine = { workspace = true }
