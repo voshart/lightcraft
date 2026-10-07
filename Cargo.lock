@@ -2425,6 +2425,7 @@ version = "0.2.1"
 dependencies = [
  "bytemuck",
  "lightcraft-color",
+ "lightcraft-denoise",
  "lightcraft-develop",
  "lightcraft-geom",
  "lightcraft-pipeline",
