@@ -295,6 +295,9 @@ impl Session {
         {
             log::error!("library: {e}");
         }
+        // what was made for the old library's photos is not this one's (photo ids are per library)
+        self.denoise.library_changed();
+        self.media.denoise.clear();
         // what was learned about the old library's faces is saved, and none of it carries over (photo ids are per library)
         #[cfg(feature = "recognition")]
         self.faces.library_changed();

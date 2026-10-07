@@ -17,6 +17,7 @@ pub mod config;
 pub mod crs;
 pub mod crs_masks;
 pub mod demo;
+pub mod denoise;
 pub mod devices;
 pub mod export;
 mod face_download;
@@ -138,6 +139,8 @@ pub struct Session {
     pub face_models_dir: Option<std::path::PathBuf>,
     /// Face models being downloaded at the user's request (`faces.models.download`).
     pub(crate) face_downloads: face_download::Downloads,
+    /// AI denoise: the model in use, the photos that have their picture and the work in progress.
+    pub(crate) denoise: denoise::State,
     /// The user's own list of models to download (`catalog.json` in the models folder), as last read.
     pub(crate) face_catalog: lightcraft_faces::catalog::Catalog,
     /// The loaded recognition model and the face embeddings made with it.
@@ -244,6 +247,7 @@ impl Session {
             skip_auto_write: false,
             face_models_dir: None,
             face_downloads: Default::default(),
+            denoise: Default::default(),
             face_catalog: Default::default(),
             #[cfg(feature = "recognition")]
             faces: Default::default(),
@@ -742,6 +746,8 @@ pub fn json_delta(old: &Value, new: &Value) -> Option<Value> {
 mod tests;
 #[cfg(test)]
 mod tests_color;
+#[cfg(test)]
+mod tests_denoise;
 #[cfg(test)]
 mod tests_export;
 #[cfg(test)]

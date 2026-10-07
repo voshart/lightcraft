@@ -71,12 +71,19 @@ pub type FileLoader = Arc<dyn Fn(&str, usize) -> Result<(Rgb32f, SourceInfo), St
 /// `max_edge` (set by the app). `None`: no usable preview.
 pub type PreviewLoader = Arc<dyn Fn(&str, usize) -> Option<Rgba8> + Send + Sync>;
 
+/// Makes a photo's denoised picture when it is not cached yet (an export does not wait for the background queue):
+/// `Ok(true)` once it is there, `Ok(false)` when denoise does not apply to this photo (render it plain), `Err` when it
+/// should have worked and did not.
+pub type MakeProduct = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
+
 /// A raw photo's cached AI-denoised picture (see [`crate::denoise`]): where the file is and the key it must have been
 /// made with. A file that is missing, damaged or made for something else is a cache miss, never an error.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct DenoiseSpec {
     pub product: std::path::PathBuf,
     pub key: String,
+    /// Run before the picture is read, by a job that must not render without it (an export).
+    pub make: Option<MakeProduct>,
 }
 
 /// Decodes a raw file once and develops it twice: as usual, and from the denoised picture in `spec` when that can be
@@ -198,15 +205,24 @@ impl SourceRef {
                 // the denoised picture comes with the plain one from a single decode; when it cannot be read the
                 // pair loader gives the plain picture alone (the cached file is never a reason to fail a render)
                 let r = match denoise {
-                    Some((spec, pair)) => match pair(path, *max_edge, spec) {
-                        Ok((image, twin, info)) => Ok(DecodedSource {
-                            image: Arc::new(image),
-                            info: Some(info),
-                            camera_tone: None,
-                            denoised: twin.map(|t| Arc::new(Twin::new(Arc::new(t)))),
-                        }),
-                        Err(e) => Err(e),
-                    },
+                    Some((spec, pair)) => {
+                        // a job that needs the denoised picture has it made first; if that fails the job fails (no smart
+                        // preview stands in: an export must not quietly come out without the denoise it was asked for)
+                        let made = match &spec.make {
+                            Some(make) => make()?,
+                            None => true,
+                        };
+                        if made {
+                            pair(path, *max_edge, spec).map(|(image, twin, info)| DecodedSource {
+                                image: Arc::new(image),
+                                info: Some(info),
+                                camera_tone: None,
+                                denoised: twin.map(|t| Arc::new(Twin::new(Arc::new(t)))),
+                            })
+                        } else {
+                            plain()
+                        }
+                    }
                     None => plain(),
                 };
                 // An offline original renders from its smart preview (no decoder facts: header ones).
@@ -479,15 +495,25 @@ impl MediaCache {
     /// How to load photo `p` at `level`: from the cache when its source is there, else from its file (with its denoised
     /// picture beside it when it has one), its smart preview or the demo scene.
     pub fn source_ref(&mut self, p: &Photo, level: SourceLevel) -> SourceRef {
-        let mut r = self.source_ref_plain(p, level);
+        self.source_ref_with(p, level, true)
+    }
+
+    /// [`Self::source_ref`] that never takes a decoded source from memory: for a job that needs something the cached
+    /// one lacks (an export, whose denoised picture is made when it runs).
+    pub fn source_ref_uncached(&mut self, p: &Photo, level: SourceLevel) -> SourceRef {
+        self.source_ref_with(p, level, false)
+    }
+
+    fn source_ref_with(&mut self, p: &Photo, level: SourceLevel, cached: bool) -> SourceRef {
+        let mut r = self.source_ref_plain(p, level, cached);
         if let (SourceRef::File { denoise, .. }, Some((spec, loader))) = (&mut r, self.denoise.get(p.id)) {
             *denoise = Some((spec.clone(), loader.clone()));
         }
         r
     }
 
-    fn source_ref_plain(&mut self, p: &Photo, level: SourceLevel) -> SourceRef {
-        if let Some(a) = self.get_source(p.id, level) {
+    fn source_ref_plain(&mut self, p: &Photo, level: SourceLevel, cached: bool) -> SourceRef {
+        if cached && let Some(a) = self.get_source(p.id, level) {
             return SourceRef::Loaded(Box::new(a));
         }
         // Procedural scenes have a nominal size: "full" is that size, not unbounded.
@@ -1001,6 +1027,15 @@ impl crate::Session {
         depth: lightcraft_pipeline::OutputDepth,
     ) -> Result<RenderJob, String> {
         let mut job = self.render_job(id, max_w, max_h, false, true).ok_or("no such photo")?;
+        // An export is made from the denoised picture its Denoise amount asks for, made when the job runs if the
+        // background queue has not got to it. (A source kept in memory may lack the picture, so the job reads the file.)
+        if let Some(wanted) = self.denoise_for_export(id, &job.settings)? {
+            let p = self.catalog.photo(id).ok_or("no such photo")?.clone();
+            job.source = self.media.source_ref_uncached(&p, job.level);
+            if let SourceRef::File { denoise, .. } = &mut job.source {
+                *denoise = Some(wanted);
+            }
+        }
         job.request.space = space;
         job.request.depth = depth;
         job.key ^= (space as u64 + 1).wrapping_mul(0xa076_1d64_78bd_642f) ^ (depth as u64 + 1).wrapping_mul(0xe703_7ed1_a0b4_28db);

@@ -28,10 +28,30 @@ pub fn default_face_models_dir() -> Option<PathBuf> {
     std::env::var_os("LIGHTCRAFT_FACE_MODELS").filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| config_dir().map(|d| d.join("models")))
 }
 
+/// Where denoise models are kept: `$LIGHTCRAFT_DENOISE_MODELS` if set, else `<config>/denoise-models`.
+pub fn default_denoise_models_dir() -> Option<PathBuf> {
+    std::env::var_os("LIGHTCRAFT_DENOISE_MODELS")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| config_dir().map(|d| d.join("denoise-models")))
+}
+
 impl Session {
     /// Keep face models in the shared default folder ([`default_face_models_dir`]).
     pub fn with_default_face_models(mut self) -> Self {
         self.face_models_dir = default_face_models_dir();
         self
+    }
+
+    /// Keep denoise models in the shared default folder ([`default_denoise_models_dir`]).
+    pub fn with_default_denoise_models(mut self) -> Self {
+        self.set_denoise_models_dir(default_denoise_models_dir());
+        self
+    }
+
+    /// Where denoise models are kept (`None`: nowhere, denoise is off).
+    pub fn set_denoise_models_dir(&mut self, dir: Option<PathBuf>) {
+        self.denoise.models_dir = dir;
+        self.denoise.touch();
     }
 }
