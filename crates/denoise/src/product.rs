@@ -235,10 +235,47 @@ pub fn is_current(path: &Path, key: &str) -> bool {
     check().unwrap_or(false)
 }
 
+/// A rectangle of a product, in the product's pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Half floats as `f32`, for all 65536 bit patterns (a table is much faster than computing each).
+fn f16_table() -> &'static [f32] {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| (0..=u16::MAX).map(from_f16).collect())
+}
+
+/// Strips decoded together (they are inflated in parallel, then folded in order).
+const GROUP: usize = 8;
+
+/// One strip, checked and inflated: for each plane the low bytes of its half floats, then the high bytes.
+fn decode_strip(index: usize, packed: &[u8], expect_crc: u32, n: usize) -> Result<Vec<u8>, ProductError> {
+    if crc(packed) != expect_crc {
+        return Err(ProductError::Format(format!("strip {index} is damaged")));
+    }
+    let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(packed, 6 * n).map_err(|e| ProductError::Format(format!("strip {index}: {e:?}")))?;
+    if raw.len() != 6 * n {
+        return Err(ProductError::Format(format!("strip {index} has the wrong size")));
+    }
+    Ok(raw)
+}
+
 /// Read the product at `path`, made from `key`, with every `factor × factor` block of pixels averaged into one
 /// (`factor` 1 = full size). The result is camera RGB.
-pub fn read(path: &Path, key: &str, factor: usize) -> Result<Rgb32f, ProductError> {
-    let factor = factor.max(1);
+///
+/// With a `window`, only that rectangle is read and the blocks start at its corner; only whole blocks are made, so
+/// the result is `window.width / factor × window.height / factor` (the same blocks a binned development of the same
+/// crop makes). Without one the whole product is read and blocks at the right and bottom edges may be smaller.
+///
+/// With `clip` (white is 1), a block in which any sample of a colour is at or above it takes that colour's
+/// maximum instead of the mean, so a clipped highlight stays clipped for highlight reconstruction.
+pub fn read_window(path: &Path, key: &str, window: Option<Window>, factor: usize, clip: Option<f32>) -> Result<Rgb32f, ProductError> {
+    let factor = factor.clamp(1, 1 << 12);
     let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
     let Start { header: h, table, expected_len } = read_start(&mut f)?;
     if h.key != key {
@@ -247,53 +284,102 @@ pub fn read(path: &Path, key: &str, factor: usize) -> Result<Rgb32f, ProductErro
     if std::fs::metadata(path)?.len() != expected_len {
         return Err(ProductError::Format("the file is not the length its header says".into()));
     }
-    let (w, ow, oh) = (h.width, h.width.div_ceil(factor), h.height.div_ceil(factor));
+    let w = window.unwrap_or(Window { x: 0, y: 0, width: h.width, height: h.height });
+    let fits = |a: usize, b: usize, limit: usize| a.checked_add(b).is_some_and(|e| e <= limit);
+    if w.width == 0 || w.height == 0 || !fits(w.x, w.width, h.width) || !fits(w.y, w.height, h.height) {
+        return Err(ProductError::Format("the window does not lie inside the picture".into()));
+    }
+    // whole blocks for a window; partial ones at the edges when the whole picture is read
+    let whole = window.is_none();
+    let (ow, oh) = if whole { (w.width.div_ceil(factor), w.height.div_ceil(factor)) } else { (w.width / factor, w.height / factor) };
+    if ow == 0 || oh == 0 {
+        return Err(ProductError::Format("the window is smaller than one block".into()));
+    }
+    // the picture rows and columns the blocks cover
+    let (x_end, y_end) = if whole { (w.x + w.width, w.y + w.height) } else { (w.x + ow * factor, w.y + oh * factor) };
     let mut out = Rgb32f { width: ow, height: oh, data: vec![[0.0; 3]; ow * oh] };
-    // sums of the block row being built, and how many input rows went into it
-    let mut sum = vec![[0f32; 3]; ow];
-    let mut rows_in = 0usize;
-    let mut oy = 0usize;
-    for (s, &(len, expect_crc)) in table.iter().enumerate() {
-        let mut packed = vec![0u8; len];
-        f.read_exact(&mut packed)?;
-        if crc(&packed) != expect_crc {
-            return Err(ProductError::Format(format!("strip {s} is damaged")));
+    let lut = f16_table();
+    let value = |raw: &[u8], c: usize, n: usize, i: usize| -> f32 {
+        let (lo, hi) = (raw.get(2 * c * n + i).copied().unwrap_or(0), raw.get((2 * c + 1) * n + i).copied().unwrap_or(0));
+        lut.get(usize::from(lo) | usize::from(hi) << 8).copied().unwrap_or(0.0)
+    };
+    // which strips are needed, and where each starts in the file (after the header and the strip table)
+    let wanted = |s: usize| s * h.strip < y_end && (s + 1) * h.strip > w.y;
+    let (mut sum, mut peak) = (vec![[0f32; 3]; ow], vec![[f32::MIN; 3]; ow]);
+    let (mut rows_in, mut oy) = (0usize, 0usize);
+    let strips: Vec<usize> = (0..table.len()).filter(|&s| wanted(s)).collect();
+    // skip the strips before the first one wanted
+    let skipped: usize = table.iter().take(strips.first().copied().unwrap_or(0)).map(|e| e.0).sum();
+    f.seek_relative(i64::try_from(skipped).map_err(|_| ProductError::Format("the file is too large".into()))?)?;
+    for group in strips.chunks(GROUP) {
+        let mut packed = Vec::with_capacity(group.len());
+        for &s in group {
+            let Some(&(len, _)) = table.get(s) else { return Err(ProductError::Format("a strip is missing".into())) };
+            let mut p = vec![0u8; len];
+            f.read_exact(&mut p)?;
+            packed.push(p);
         }
-        let y0 = s * h.strip;
-        let rows = (h.height - y0).min(h.strip);
-        let n = rows * w;
-        let raw =
-            miniz_oxide::inflate::decompress_to_vec_with_limit(&packed, 6 * n).map_err(|e| ProductError::Format(format!("strip {s}: {e:?}")))?;
-        if raw.len() != 6 * n {
-            return Err(ProductError::Format(format!("strip {s} has the wrong size")));
-        }
-        for r in 0..rows {
-            for x in 0..w {
-                let i = r * w + x;
-                let px = &mut sum[x / factor];
-                for (c, v) in px.iter_mut().enumerate() {
-                    let bits = u16::from(raw[2 * c * n + i]) | (u16::from(raw[(2 * c + 1) * n + i]) << 8);
-                    *v += from_f16(bits);
+        let decoded: Vec<Result<Vec<u8>, ProductError>> = group
+            .par_iter()
+            .zip(packed.par_iter())
+            .map(|(&s, p)| {
+                let rows = h.height.saturating_sub(s * h.strip).min(h.strip);
+                decode_strip(s, p, table.get(s).map_or(0, |e| e.1), rows * h.width)
+            })
+            .collect();
+        for (&s, raw) in group.iter().zip(decoded) {
+            let raw = raw?;
+            let y0 = s * h.strip;
+            let rows = h.height.saturating_sub(y0).min(h.strip);
+            let n = rows * h.width;
+            for r in 0..rows {
+                let y = y0 + r;
+                if y < w.y || y >= y_end {
+                    continue;
                 }
-            }
-            rows_in += 1;
-            let last_row = y0 + r + 1 == h.height;
-            if rows_in == factor || last_row {
-                for (ox, px) in sum.iter_mut().enumerate() {
-                    // the block's size at the right and bottom edges may be smaller
-                    let bw = factor.min(w - ox * factor);
-                    let k = 1.0 / (rows_in * bw) as f32;
-                    if let Some(o) = out.data.get_mut(oy * ow + ox) {
-                        *o = px.map(|v| v * k);
+                let base = r * h.width;
+                for (ox, (sm, pk)) in sum.iter_mut().zip(peak.iter_mut()).enumerate() {
+                    let x0 = w.x + ox * factor;
+                    let x1 = (x0 + factor).min(x_end);
+                    for x in x0..x1 {
+                        for c in 0..3 {
+                            let v = value(&raw, c, n, base + x);
+                            if let (Some(s_), Some(p_)) = (sm.get_mut(c), pk.get_mut(c)) {
+                                *s_ += v;
+                                *p_ = p_.max(v);
+                            }
+                        }
                     }
-                    *px = [0.0; 3];
                 }
-                rows_in = 0;
-                oy += 1;
+                rows_in += 1;
+                if rows_in == factor || y + 1 == y_end {
+                    for (ox, (sm, pk)) in sum.iter_mut().zip(peak.iter_mut()).enumerate() {
+                        // the block's size at the right and bottom edges may be smaller
+                        let bw = (x_end - (w.x + ox * factor)).min(factor);
+                        let k = 1.0 / (rows_in * bw).max(1) as f32;
+                        if let Some(o) = out.data.get_mut(oy * ow + ox) {
+                            for c in 0..3 {
+                                let (s_, p_) = (sm.get(c).copied().unwrap_or(0.0), pk.get(c).copied().unwrap_or(0.0));
+                                if let Some(slot) = o.get_mut(c) {
+                                    *slot = if factor > 1 && clip.is_some_and(|t| p_ >= t) { p_ } else { s_ * k };
+                                }
+                            }
+                        }
+                        *sm = [0.0; 3];
+                        *pk = [f32::MIN; 3];
+                    }
+                    rows_in = 0;
+                    oy += 1;
+                }
             }
         }
     }
     Ok(out)
+}
+
+/// [`read_window`] of the whole product: every `factor × factor` block averaged into one.
+pub fn read(path: &Path, key: &str, factor: usize) -> Result<Rgb32f, ProductError> {
+    read_window(path, key, None, factor, None)
 }
 
 /// `base + (denoised − base) · amount` for every pixel (`amount` 0 to 1), in place in `base`. The two pictures must
@@ -363,6 +449,70 @@ mod tests {
         assert_eq!((odd.width, odd.height), (w.div_ceil(5), h.div_ceil(5)));
         assert!((mean(&odd) - mean(&img)).abs() < 0.01);
         assert!(matches!(read(&p, "other", 1), Err(ProductError::Stale)));
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    /// What binning a window of `img` by `k` means, written the slow obvious way.
+    fn blocks(img: &Rgb32f, win: Window, k: usize, clip: Option<f32>) -> Rgb32f {
+        let (ow, oh) = (win.width / k, win.height / k);
+        let mut out = Rgb32f { width: ow, height: oh, data: vec![[0.0; 3]; ow * oh] };
+        for by in 0..oh {
+            for bx in 0..ow {
+                for c in 0..3 {
+                    let vals: Vec<f32> = (0..k * k).map(|i| img.data[(win.y + by * k + i / k) * img.width + win.x + bx * k + i % k][c]).collect();
+                    let max = vals.iter().copied().fold(f32::MIN, f32::max);
+                    out.data[by * ow + bx][c] =
+                        if k > 1 && clip.is_some_and(|t| max >= t) { max } else { vals.iter().sum::<f32>() / vals.len() as f32 };
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_window_is_read_as_the_blocks_of_that_crop() {
+        let (w, h) = (301, 517);
+        let mut img = picture(w, h);
+        // a clipped sample in the middle of a block
+        img.data[(130 + 2) * w + 61 + 1] = [1.0, 0.4, 0.4];
+        let p = temp("window");
+        write(&p, &img, "k1").unwrap();
+        let near = |a: &Rgb32f, b: &Rgb32f| {
+            assert_eq!((a.width, a.height), (b.width, b.height));
+            for (x, y) in a.data.iter().zip(&b.data) {
+                for c in 0..3 {
+                    assert!((x[c] - y[c]).abs() < 0.003, "{x:?} vs {y:?}");
+                }
+            }
+        };
+        // windows at odd places, across strip boundaries (128 rows), with factors that do and do not divide them
+        for (win, k) in [
+            (Window { x: 3, y: 5, width: 200, height: 300 }, 1),
+            (Window { x: 3, y: 5, width: 200, height: 300 }, 4),
+            (Window { x: 61, y: 130, width: 121, height: 250 }, 5),
+            (Window { x: 0, y: 0, width: w, height: h }, 2),
+            (Window { x: 1, y: 380, width: 90, height: 137 }, 3),
+        ] {
+            let got = read_window(&p, "k1", Some(win), k, None).unwrap();
+            near(&got, &blocks(&img, win, k, None));
+        }
+        // with a clip level the block with the clipped sample keeps its highest value, the others stay means
+        let win = Window { x: 61, y: 130, width: 40, height: 20 };
+        let clipped = read_window(&p, "k1", Some(win), 4, Some(0.99)).unwrap();
+        near(&clipped, &blocks(&img, win, 4, Some(0.99)));
+        assert!(clipped.data[0][0] > 0.99, "the clipped block stays clipped: {:?}", clipped.data[0]);
+        let plain = read_window(&p, "k1", Some(win), 4, None).unwrap();
+        assert!(plain.data[0][0] < 0.99, "an average falls below the clip level");
+        // windows that do not fit, or are smaller than a block, are errors
+        for bad in [
+            Window { x: 0, y: 0, width: 0, height: 5 },
+            Window { x: 290, y: 0, width: 20, height: 5 },
+            Window { x: 0, y: 510, width: 5, height: 10 },
+            Window { x: usize::MAX, y: 0, width: 2, height: 2 },
+            Window { x: 0, y: 0, width: 3, height: 3 },
+        ] {
+            assert!(read_window(&p, "k1", Some(bad), 4, None).is_err(), "{bad:?}");
+        }
         std::fs::remove_file(&p).unwrap();
     }
 

@@ -3,6 +3,7 @@
 //! made again, and the amount is an ordinary develop setting.
 //!
 //! - [`manifest`]: what a denoise model takes and gives, and who may use it (untrusted JSON, validated).
+//! - [`known`] and [`archive`]: the models LightCraft can fetch, and taking the model file out of the `.zip` it comes in.
 //! - [`bayer`]: Bayer layouts and the packing of a mosaic into the four planes a model takes.
 //! - [`tiles`] and [`run`]: cutting a picture into overlapping tiles for a fixed-size model, bringing each tile's
 //!   output scale back to the input's, keeping clipped highlights as they were, and blending the tiles together.
@@ -16,7 +17,9 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod archive;
 pub mod bayer;
+pub mod known;
 pub mod manifest;
 pub mod product;
 pub mod run;
