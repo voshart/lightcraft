@@ -166,8 +166,10 @@ and the web build) has no runner: the commands say so and the slider stays out o
 - **Bayer raws only.** X-Trans (Fujifilm), Foveon, already demosaiced DNGs and non-raw photos keep their normal noise
   reduction. A *linear* (demosaiced RGB) model would cover those and DNGs from phones; the contract does not have it yet.
 - **CPU only, and CPU-bound.** The model does about 1.4 s of work per 1-megapixel tile on one core, and a 24 MP photo is 35
-  tiles. It runs as fast as the cores allow (table above), but a GPU path is where a real speed-up would come from (not
-  measured; not built).
+  tiles. It runs as fast as the cores allow (table above). There is no GPU path: tract, the runtime used here, has only
+  CPU kernels (GPU ONNX runtimes written in Rust, such as wonnx and burn, were not evaluated; ONNX Runtime would break
+  the pure-Rust rule). Not built, not measured. See *A GPU
+  path* below.
 - **No quality comparison** against Lightroom, and no tuning of the blend for dark or clipped areas beyond keeping clipped
   highlights.
 - **The weights are GPL-3.0** (above), and RawNIND was trained on a limited set of sensors.
@@ -177,5 +179,16 @@ and the web build) has no runner: the commands say so and the slider stays out o
 1. A maintainer decision on the model: keep the opt-in GPL download, or **train our own on the RawNIND data** (CC BY 4.0 /
    CC0, the paper describes the recipe) and publish MIT/Apache weights; then the button can be a plain one.
 2. A linear-RGB contract for X-Trans and phone DNGs.
-3. A GPU path.
+3. **A GPU path.** Not a hard problem, only unbuilt. The RawNIND Bayer model has seven kinds of node (tract's count of the
+   file): 19 convolutions, 4 transposed convolutions, 18 LeakyReLU, 4 max-pools, 4 concats and one depth-to-space, with no
+   attention or normalisation layers. Its convolutions come to about 93 GFLOP per tile (tract's cost model, convolutions
+   only), so about 3 TFLOP for a 24 MP photo; the biggest feature map is 64 channels × 512 × 512 floats (67 MB). A runner
+   written as WGSL compute kernels in the existing wgpu pipeline (`crates/gpu`) would plug in behind the same
+   one-tile-in, one-tile-out interface the CPU runner has (`run::TileRunner`), leaving the cache, the commands and the
+   interface alone, and the CPU runner would be its reference: tile outputs must match within a tolerance, as the GPU
+   develop pipeline already does against the CPU one. The cost is mostly in making the convolution kernel fast (a portable shader will
+   not reach a GPU's peak); no buffer is larger than 67 MB, inside wgpu's default binding limit. The gain depends on
+   the adapter: a discrete GPU should do the model stage in about a second (an estimate, not a measurement), but an
+   integrated one with a couple of compute units would be no faster than the CPU, so it must pick the adapter and fall
+   back.
 4. A side-by-side fidelity suite (shared with the render-fidelity work).
