@@ -21,10 +21,16 @@ use crate::widgets::register;
 /// machine once they have been idle for a few seconds, or while another app has the keyboard but this window is still
 /// on screen; most of it while they are looking at the scan's progress.
 fn scan_pace(app: &LightcraftApp, ctx: &egui::Context, now: f64) -> (&'static str, bool) {
-    let (focused, minimized) = ctx.input(|i| (i.focused, i.raw.viewports.get(&i.raw.viewport_id).and_then(|v| v.minimized).unwrap_or(false)));
+    let focused_and_visible = ctx.input(|i| i.focused && !i.raw.viewports.get(&i.raw.viewport_id).and_then(|v| v.minimized).unwrap_or(false));
     let watching =
         matches!(&app.ui.dialog, Some(crate::state::Dialog::Settings { tab }) if tab == "faces") || app.ui.view == crate::state::ViewMode::People;
-    (pace_for(focused, minimized, now - app.caches.last_input, now - app.caches.last_move, watching), focused && !minimized)
+    (window_pace(app, ctx, now, watching), focused_and_visible)
+}
+
+/// The pace for background work the user is (`watching`) or is not looking at the progress of, from what they are doing.
+pub(super) fn window_pace(app: &LightcraftApp, ctx: &egui::Context, now: f64, watching: bool) -> &'static str {
+    let (focused, minimized) = ctx.input(|i| (i.focused, i.raw.viewports.get(&i.raw.viewport_id).and_then(|v| v.minimized).unwrap_or(false)));
+    pace_for(focused, minimized, now - app.caches.last_input, now - app.caches.last_move, watching)
 }
 
 /// The pace for a window that has the keyboard (or not) and is minimized (or not), `worked` seconds after the user last
@@ -158,7 +164,7 @@ pub fn setup_banner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
 }
 
 /// A download-style size: decimal megabytes, as file managers and model pages show them.
-fn mb(bytes: Option<u64>) -> String {
+pub(super) fn mb(bytes: Option<u64>) -> String {
     match bytes {
         Some(b) if b >= 10_000_000 => format!("{} MB", (b as f64 / 1e6).round() as u64),
         Some(b) if b >= 1_000_000 => format!("{:.1} MB", b as f64 / 1e6),
@@ -168,7 +174,7 @@ fn mb(bytes: Option<u64>) -> String {
 }
 
 /// "its input is not an image" → "Its input is not an image."
-fn sentence(s: &str) -> String {
+pub(super) fn sentence(s: &str) -> String {
     let s = s.trim();
     let mut c = s.chars();
     let mut out: String = c.next().map(|f| f.to_uppercase().collect()).unwrap_or_default();
@@ -180,7 +186,7 @@ fn sentence(s: &str) -> String {
 }
 
 /// "Apache-2.0 · commercial use allowed"
-fn licence_line(m: &Value) -> String {
+pub(super) fn licence_line(m: &Value) -> String {
     let name = m["licence"]["name"].as_str().filter(|s| !s.is_empty()).unwrap_or("Unknown licence");
     let terms = match m["licence"]["commercial"].as_str() {
         Some("yes") => "commercial use allowed",
@@ -190,7 +196,7 @@ fn licence_line(m: &Value) -> String {
     format!("{name} · {terms}")
 }
 
-fn open_page(app: &mut LightcraftApp, url: &str) {
+pub(super) fn open_page(app: &mut LightcraftApp, url: &str) {
     if let Some(f) = app.services.open_url.as_mut() {
         let _ = f(url);
     }
@@ -409,12 +415,11 @@ pub fn model_dialog(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, info
     let download = info["download"].is_string();
     if download {
         let host = info["host"].as_str().unwrap_or("its own repository");
+        let after = if info["domain"] == "denoise" { "starts using it for AI Denoise" } else { "starts using it and turns face recognition on" };
         ui.add(
             egui::Label::new(
-                RichText::new(format!(
-                    "Downloads from {host}. Once it has arrived and checked out, LightCraft installs it, starts using it and turns face recognition on."
-                ))
-                .color(t.text_label),
+                RichText::new(format!("Downloads from {host}. Once it has arrived and checked out, LightCraft installs it, {after}."))
+                    .color(t.text_label),
             )
             .wrap(),
         );

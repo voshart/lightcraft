@@ -274,6 +274,10 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             control(app, ui, d, c, c == "detail.sharpenAmount" || d.detail.sharpen_amount > 0.0);
         }
         sub_title(ui, crate::i18n::tr("Noise Reduction"));
+        // AI Denoise: how much of the photo's cleaned picture to mix in (raw files only), and what that picture is doing
+        let applicable = !matches!(app.session.denoise_photo_state(id), lightcraft_engine::denoise::PhotoState::NotApplicable);
+        control(app, ui, d, "enhance.denoise", applicable);
+        super::denoise::detail_status(app, ui, id, d.enhance.denoise);
         for c in ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast", "detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"]
         {
             control(app, ui, d, c, true);

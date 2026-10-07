@@ -572,6 +572,7 @@ impl LightcraftApp {
         }
         self.session.persist_if_dirty();
         panels::faces::pump(self, ctx);
+        panels::denoise::pump(self, ctx);
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
         if self.fonts_ready {
@@ -853,6 +854,8 @@ pub struct Caches {
     pub album_count_scans: usize,
     /// Bumped when a face model is installed, removed or chosen, so Settings re-reads the list at once.
     pub faces_epoch: u64,
+    /// AI denoise: what the pump last saw, the model list and the downloads being watched.
+    pub denoise: panels::denoise::Ui,
     /// Face models the user pressed Download for that have not arrived yet (model ids): the licence dialog opens for
     /// each when its file is ready.
     pub faces_dl_watch: Vec<String>,
