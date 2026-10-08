@@ -1,9 +1,11 @@
 # Olympus ORF: independently observed container and packed 12-bit layout
 
-This is a **partial specification**, not a specification of Olympus's compressed
-pixel stream. Compressed ORF remains unsupported. The independently established
-packed layout below is implemented; entropy coding, residuals, prediction,
-adaptive state, row resets and termination of compressed ORF are still unknown.
+This document covers container metadata and the implemented packed layout.
+The separate [measured compressed 12-bit profile](orf12-compressed-measured.md)
+now describes token/state/predictor rules and complete raster comparisons on
+seventeen originals. Compressed ORF remains unsupported in the product pending
+separate specification review and implementation; the generalized 14-bit variant
+remains unverified.
 See [provenance and acceptance gates](orf12-provenance.md).
 
 ## Scope and evidence
@@ -106,7 +108,11 @@ need samples to establish effective depth; packed files without a valid Exif CFA
 still need samples for the fallback phase estimate. `probe_info` and successful
 full decode must describe the same image.
 
-## Compressed stream: observed, not specified
+## Initial compressed-stream observations
+
+The paragraphs below preserve the initial limited observations. Subsequent
+derivation and full-frame checks are in the
+[measured profile](orf12-compressed-measured.md).
 
 The seven compressed candidates share a seven-byte strip prefix; a prefix is an
 observation, not a documented codec identifier. The isolated perturbation tool
@@ -122,8 +128,8 @@ Long-range changes can be caused by variable-length coding, predictor propagatio
 adaptive state or several mechanisms together. These experiments do not select
 one explanation, establish bit order, or justify a decoder implementation.
 
-The next research gate is a rule-by-rule account of the compressed stream with
-experiments that distinguish competing bit-order, code-length, predictor and
-reset hypotheses. Only after independent review of that evidence should a new
-decoder and its test vectors be written. The rejected compressed encoder/decoder
+The subsequent experiments distinguish competing bit-order, code-length,
+predictor and reset hypotheses. The resulting evidence account is ready for
+separate review before a product decoder and its test vectors are written.
+The rejected compressed encoder/decoder
 from PR #240 is not an input to this document or implementation.

@@ -51,6 +51,10 @@ Priorities, in order. Each points at tracker rows in [`docs/parity.md`](docs/par
 2. **Raw formats, clean-room** (LR-IMP-FORMATS, P0): **CR3** first, then compressed RAF / ORF, NEF
    lossy-after-split, sRAW. Decided 2026-10-05: write our own decoders from prose descriptions (never decoder source,
    no LGPL dependency); compressed NEF (#86) is the template.
+   ORF's independently measured 12-bit profile now matches all 434,555,200 stored
+   samples across seventeen originals, including E-M5 III high-resolution margins
+   ([review package](docs/raw/orf12-compressed-measured.md)); separate specification
+   review and Rust implementation remain, and generalized 14-bit support is unverified.
 3. **Verified camera coverage** (LR-IMP-CAMERA-COVERAGE, P0): a CC0 sample per model in the corpus, each decoded and
    checked for plausible colour; fix per-model bugs (#85).
 4. **Render fidelity suite** (LR-BEHAV-RENDER-FIDELITY, P1): measure our output against Lightroom on the same CC0 raws

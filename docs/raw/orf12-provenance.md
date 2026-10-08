@@ -23,6 +23,20 @@ Task: `LR-IMP-FORMATS` / M11.3. Started 2026-10-08. Baseline:
 - Additional inputs: fourteen licence-verified external CC0 specimens and their
   primary corpus metadata. No third-party decoder source or corpus script was
   opened. See [source checks and findings](https://github.com/voshart/Rust-Olympus-RAW-decoder/blob/4d29fe4886d893883a78f6099f02d8dd17d47192/research/public-samples.md).
+- The creator subsequently contributed two more E-M5 III ORFs under CC0. The
+  corpus now has ten unchanged ORFs and two JPEGs. The nine compressed creator
+  originals and eight external controls have complete numerical comparisons in
+  [research commit 9d8c927](https://github.com/voshart/Rust-Olympus-RAW-decoder/tree/9d8c927b8f181c6eea4358db30b3a71641922aaf).
+- The token/state/predictor hypothesis was captured in a 96-file local immutable
+  snapshot before two user-supplied source-derived prose explanations were read.
+  The first-row work was already published; later-row work was locally uncommitted.
+  A generic libopenraw container-recognition snippet appeared incidentally in a
+  documentation search; its source page was not opened, and it supplied no
+  compressed coding rule. The later full-frame checks use the unchanged frozen
+  model. Generalized 14-bit/header interpretations from the supplied prose are
+  external claims, not independently established rules. Full exposure details,
+  document hashes, checkpoint identities and failed hypotheses are in the pinned
+  [research provenance](https://github.com/voshart/Rust-Olympus-RAW-decoder/blob/9d8c927b8f181c6eea4358db30b3a71641922aaf/research/orf12-provenance.md).
 
 ## Evidence trail
 
@@ -37,6 +51,8 @@ Task: `LR-IMP-FORMATS` / M11.3. Started 2026-10-08. Baseline:
 | S1 | Independently generated packed and Exif fixtures | Four Bayer layouts/two byte orders, boundary values, truncations and mutations | Round trips are supporting evidence, not independent correctness |
 | S2 | Synthetic maker-note crop at u64::MAX | Old unchecked crop addition overflows; checked coordinates fall back to the sensor area | Non-conforming numeric tag type |
 | X1 | Isolated compressed-strip byte perturbations | Reproducible reference failures/difference extents | Does not establish compressed coding rules |
+| X2 | Independent first-row, reset and predictor families, then complete E01/V02 candidate rasters saved before full native comparison | 434,555,200 identical samples across seventeen compressed originals, with no margins excluded | Research scope, one binary reference family; product compressed decoder not implemented |
+| X3 | Final-byte influence, procedural reader oracle and final-token byte cuts | Twenty-four mutations include fourteen unused-bit no-effect cases; thirty required-byte cuts reject | No universal padding rule or completed product fuzzing suite |
 
 Local artifacts: `plan/orf-research/private-manifest.json`,
 `packed12-reference.json`, `compressed-perturbations.json`, and the Rust audit
@@ -80,8 +96,9 @@ The optional instrument is not needed to build, test or run LightCraft.
 5. Keep camera colour and lens correction acceptance separate from unpacking.
    Accurate samples do not establish Lightroom rendering parity.
 
-This work satisfies the observed padded packed-layout gate on two E-M5 II files. It does **not**
-claim that the compressed specification, broader camera verification or colour
-calibration gates have been passed. A rights-holder grant is an alternative to
+This work satisfies the observed padded packed-layout gate on two E-M5 II files
+and numerical full-raster checks of the measured compressed 12-bit profile on
+seventeen originals. Separate specification review, product implementation/safety
+gates, generalized 14-bit coverage and colour calibration remain. A rights-holder grant is an alternative to
 independent derivation only for exactly the implementation covered by that grant;
 the maintainers must decide whether it fits the project policy.
