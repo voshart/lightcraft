@@ -51,3 +51,8 @@ contain only source, synthetic tests, general format notes and provenance.
 
 These tools currently specify container metadata and one padded packed layout.
 They do not constitute an independently established compressed ORF specification.
+
+The creator-released CC0 originals, pinned external specimen identities and
+versioned reference observations are in the separate
+[Olympus research corpus](https://github.com/voshart/Rust-Olympus-RAW-decoder/tree/4d29fe4886d893883a78f6099f02d8dd17d47192).
+Use its Git LFS instructions and SHA-256 verifier; keep media outside this repo.

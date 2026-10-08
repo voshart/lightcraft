@@ -15,9 +15,14 @@ Task: `LR-IMP-FORMATS` / M11.3. Started 2026-10-08. Baseline:
   remembered code or reconstructed from the rejected contribution.
 - Metadata and simple packed-pair fixtures are independently generated with
   LightCraft's existing TIFF writer. They do not encode a compressed ORF stream.
-- The local originals are user-provided, not a redistributable corpus. Neither
-  media nor derived sensor arrays are committed. Public CC0 held-out samples are
-  still needed before claiming broader packed-camera coverage.
+- The creator has explicitly released all ten initial originals as CC0 in a
+  separate [public corpus repository](https://github.com/voshart/Rust-Olympus-RAW-decoder/tree/4d29fe4886d893883a78f6099f02d8dd17d47192/corpus/voshart-olympus).
+  They remain unchanged. No media, derived sensor arrays or binary instruments
+  are committed to LightCraft. A public E-M5 II held-out sample now also passes
+  every-sample comparison; broader camera/mode claims still need distinct evidence.
+- Additional inputs: fourteen licence-verified external CC0 specimens and their
+  primary corpus metadata. No third-party decoder source or corpus script was
+  opened. See [source checks and findings](https://github.com/voshart/Rust-Olympus-RAW-decoder/blob/4d29fe4886d893883a78f6099f02d8dd17d47192/research/public-samples.md).
 
 ## Evidence trail
 
@@ -25,9 +30,10 @@ Task: `LR-IMP-FORMATS` / M11.3. Started 2026-10-08. Baseline:
 |---|---|---|---|
 | C1 | `inspect_orf.py`, eight ORFs and two JPEGs, hashed before use | Models, lenses, dimensions, CFA and strip budgets recorded | Local specimen coverage only |
 | C2 | Compare E-M5 II Exif CFA in ordinary/high-resolution modes | RGGB versus GRBG | No model-table inference |
-| P1 | Divide high-resolution strip count by height and width | 14,848 bytes/row; ten samples/16 bytes | One private original |
+| P1 | Divide high-resolution strip count by height and width | 14,848 bytes/row; ten samples/16 bytes | One initial original, later released as CC0 |
 | P2 | Count padding and compare low/high-nibble hypotheses in masked columns | 6,432,896 zero pads; sharply different border distributions | Statistics alone do not prove packing |
 | P3 | Compare the Python hypothesis and final Rust reader to black-box sensor output | All three full-sensor hashes agree; 64,328,960 identical samples, including borders | Reference implementation may itself have bugs |
+| P4 | Public held-out PIXLS.US 2856 | Python, final Rust reader and reference match all 64,328,960 sensor samples | Same E-M5 II mode; no broader camera claim |
 | S1 | Independently generated packed and Exif fixtures | Four Bayer layouts/two byte orders, boundary values, truncations and mutations | Round trips are supporting evidence, not independent correctness |
 | S2 | Synthetic maker-note crop at u64::MAX | Old unchecked crop addition overflows; checked coordinates fall back to the sensor area | Non-conforming numeric tag type |
 | X1 | Isolated compressed-strip byte perturbations | Reproducible reference failures/difference extents | Does not establish compressed coding rules |
@@ -36,6 +42,9 @@ Local artifacts: `plan/orf-research/private-manifest.json`,
 `packed12-reference.json`, `compressed-perturbations.json`, and the Rust audit
 sensor dump. Input and output hashes make accidental specimen changes detectable.
 Tools write observations with create-new semantics and open photographs read-only.
+The separate public repository versions the released originals, whitelisted
+observations, instrument versions and per-file comparison hashes; derived sensor
+arrays and reference binaries remain local.
 
 ## External measuring instrument
 
@@ -71,7 +80,7 @@ The optional instrument is not needed to build, test or run LightCraft.
 5. Keep camera colour and lens correction acceptance separate from unpacking.
    Accurate samples do not establish Lightroom rendering parity.
 
-This work satisfies the observed packed-layout gate on one file. It does **not**
+This work satisfies the observed padded packed-layout gate on two E-M5 II files. It does **not**
 claim that the compressed specification, broader camera verification or colour
 calibration gates have been passed. A rights-holder grant is an alternative to
 independent derivation only for exactly the implementation covered by that grant;

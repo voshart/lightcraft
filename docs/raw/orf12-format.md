@@ -9,8 +9,9 @@ See [provenance and acceptance gates](orf12-provenance.md).
 ## Scope and evidence
 
 The initial local sample set has eight original ORFs from an Olympus E-M5 II and
-E-M5 III, and two companion JPEGs. The originals and generated sensor arrays stay
-outside Git. The repeatable tools are in [tools/orf-research](../../tools/orf-research/README.md).
+E-M5 III, and two companion JPEGs. The creator has released the originals as CC0 in a
+[separate corpus repository](https://github.com/voshart/Rust-Olympus-RAW-decoder/tree/4d29fe4886d893883a78f6099f02d8dd17d47192/corpus/voshart-olympus).
+Media and generated sensor arrays stay outside LightCraft's Git history. The repeatable tools are in [tools/orf-research](../../tools/orf-research/README.md).
 File hashes and experiment results live in the gitignored `plan/orf-research/`.
 The specimen identifiers below are resolved to hashes in that local manifest.
 This is verified sample coverage, not a guarantee for every camera or mode.
@@ -88,6 +89,14 @@ with zero difference. Both independently unpacked and reference arrays have
 SHA-256 `aea032c10a27ff82918a465b4cc0bdb701f65ce119a3d134ad8ebd60ff5d61d3`
 when serialized as row-major little-endian u16.
 The final Rust reader independently produced that same full-sensor hash.
+A held-out CC0 E-M5 II high-resolution file from PIXLS.US record 2856 also matches
+all 64,328,960 samples in the Python hypothesis, final Rust reader and binary
+instrument. Its input SHA-256 is
+`5c42fa75d6b549514b722e2c50726c03e34fac4909ec3640e147ea7fa825fc8d`;
+its full-sensor little-endian u16 SHA-256 is
+`79aa165b0c74e88ff6c3e3e027e86aad30a6957d9b7d3d8990668aafbb393ef4`.
+See [the held-out results and limits](https://github.com/voshart/Rust-Olympus-RAW-decoder/blob/4d29fe4886d893883a78f6099f02d8dd17d47192/research/public-samples.md#held-out-e-m5-ii-high-resolution-packing).
+This verifies two originals in the same camera mode.
 
 The product recognizes this packing ahead of the existing LE32/MSB-first packed
 layout for a little-endian, single-full-height-strip, unsigned one-sample layout,

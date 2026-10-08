@@ -170,7 +170,7 @@ LJ92, lossy JPEG / Smart Previews, Deflate, float, linear), CR2, ARW (uncompress
 maker-note `Tag2010` and the encrypted `SR2SubIFD`, both recovered by black-box analysis, `crates/raw/src/vendor/arw.rs`), NEF/NRW uncompressed and Huffman-compressed (lossless, lossy type 1/2, 12/14-bit), RAF uncompressed (Bayer and
 X-Trans), RW2 / Leica RWL / Panasonic RAW in every raw format (compressed formats 4 and 6, the prefix-coded strips of format 8,
 packed formats 2, 5 and 7, the 16-bit words of the 2005–2007 bodies; all recovered by black-box analysis of 178 CC0 files from
-118 bodies, `crates/raw/src/vendor/rw2.rs`), PEF (uncompressed and Huffman), ORF uncompressed (16-bit words, LE32/MSB-first 12-bit and the padded 12-bit E-M5 II High Res Shot layout; the latter checked on one private original, with all 64,328,960 sensor samples matching a separately installed binary reference). Every
+118 bodies, `crates/raw/src/vendor/rw2.rs`), PEF (uncompressed and Huffman), ORF uncompressed (16-bit words, LE32/MSB-first 12-bit and the padded 12-bit E-M5 II High Res Shot layout; the latter checked on two CC0 originals, including a public held-out file, each with all 64,328,960 sensor samples matching a separately installed binary reference). Every
 supported container also yields its embedded JPEG preview (CR3 too), and the engine shows that preview for raw variants
 it can't decode yet.
 

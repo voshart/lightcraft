@@ -5,7 +5,7 @@
 ### RAW decoding
 - Olympus ORFs read their Bayer layout from the file's Exif tag, including layouts that the former
   green-diagonal estimate could not distinguish. E-M5 II padded 12-bit High Res Shot now decodes its actual
-  sensor samples (one private original checked exactly against 64.3 million reference samples). Tagged packed
+  sensor samples (two CC0 originals each checked exactly against 64.3 million reference samples). Tagged packed
   ORFs can be probed without unpacking their pixels. Compressed ORF remains preview-only; camera colour and
   lens calibration remain separate gaps. The independent measurements are in `docs/raw/orf12-format.md`.
 - Sony ILCE-7M4 downsized lossless ARWs now decode subsampled YCbCr tiles into linear RGB,
