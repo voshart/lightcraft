@@ -14,7 +14,8 @@
 //! Formats: DNG (uncompressed, lossless JPEG, lossy JPEG (Smart Previews), Deflate incl. floating point, tiled/stripped, CFA and LinearRaw),
 //! Canon CR2, Nikon NEF/NRW (uncompressed, Huffman lossless / lossy compressed), Sony ARW (uncompressed, ARW2, lossless), Fujifilm RAF (uncompressed Bayer
 //! and X-Trans), Panasonic RW2 / Leica RWL / Panasonic RAW (every raw format: compressed 4 and 6, the prefix-coded strips of 8,
-//! packed 2/5/7, the 16-bit words of the oldest bodies), Pentax PEF (uncompressed, Huffman), Olympus ORF (uncompressed).
+//! packed 2/5/7, the 16-bit words of the oldest bodies), Pentax PEF (uncompressed, Huffman), Olympus ORF (uncompressed
+//! words and packed 12-bit, including the padded E-M5 II High Res Shot layout).
 //! [`embedded_preview`] covers all of them plus CR3. Variants we can't decode yet (Nikon "lossy after split" NEF,
 //! compressed ORF/RAF, CR3) return [`RawError::Unsupported`]; each vendor module documents its sources
 //! (public specifications, tag-name documentation, black-box analysis of CC0 samples) and gaps. Non-DNG files carry no
@@ -92,7 +93,15 @@ impl RawFormat {
     pub fn is_supported(self) -> bool {
         matches!(
             self,
-            RawFormat::Dng | RawFormat::Cr2 | RawFormat::Nef | RawFormat::Nrw | RawFormat::Arw | RawFormat::Raf | RawFormat::Rw2 | RawFormat::Pef
+            RawFormat::Dng
+                | RawFormat::Cr2
+                | RawFormat::Nef
+                | RawFormat::Nrw
+                | RawFormat::Arw
+                | RawFormat::Raf
+                | RawFormat::Rw2
+                | RawFormat::Pef
+                | RawFormat::Orf
         )
     }
 }
@@ -159,7 +168,8 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
 /// measure them from the samples).
 ///
 /// A few uncompressed vendor formats derive part of this from the samples themselves (Nikon
-/// NEF: optically masked trailing columns; Olympus ORF: the CFA phase and bit depth; Pentax PEF
+/// NEF: optically masked trailing columns; Olympus ORF: bit depth in 16-bit words, or CFA phase
+/// when no valid Exif CFAPattern is present; Pentax PEF
 /// without crop tags: dark borders); for those the samples are read (unpacked, nothing to
 /// decompress) and dropped.
 pub fn probe_info(bytes: &[u8]) -> Result<RawInfo> {
@@ -185,7 +195,7 @@ fn decode_with(bytes: &[u8], mode: Mode) -> Result<RawImage> {
         RawFormat::Raf => vendor::raf::decode(bytes, mode),
         RawFormat::Rw2 => vendor::rw2::decode(bytes, mode),
         RawFormat::Pef => vendor::pef::decode(bytes, mode),
-        RawFormat::Orf => vendor::orf::decode(bytes),
+        RawFormat::Orf => vendor::orf::decode(bytes, mode),
         other => Err(RawError::Unsupported(format!("{other:?} files are not decoded yet"))),
     }
 }
