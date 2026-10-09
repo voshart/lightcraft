@@ -194,6 +194,7 @@ impl Headless {
             || self.app.scan.is_some()
             || self.app.import.is_some()
             || self.app.export.is_some()
+            || self.app.session.denoise_busy()
             || !self.app.tasks.is_empty()
             || !self.app.synthetic.is_empty()
             || !self.events.is_empty()
@@ -291,6 +292,62 @@ impl Headless {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detail_offers_ai_denoise_for_raw_photos_and_leads_to_its_settings() {
+        use crate::state::Dialog;
+        use lightcraft_catalog::{MediaKind, Op, Photo, PhotoId, Source};
+        let mut h = demo([1400.0, 900.0]);
+        let t = Duration::from_secs(10);
+        let dir = std::env::temp_dir().join(format!("lc-ui-denoise-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        h.app.session.set_denoise_models_dir(Some(dir.join("denoise-models")));
+        // a raw photo (its file need not exist: nothing here reads it)
+        let id = PhotoId(h.app.session.catalog.photos().map(|p| p.id.0).max().unwrap_or(0) + 1);
+        let mut raw = Photo::new(
+            id,
+            Source::File { path: dir.join("IMG_1.dng").to_string_lossy().into_owned() },
+            "IMG_1.dng",
+            "DNG",
+            6000,
+            4000,
+            "2026-10-01T00:00:00",
+        );
+        raw.kind = MediaKind::Raw;
+        h.app.session.commit("setup", Op::AddPhoto { photo: Box::new(raw) }).unwrap();
+        let widgets = |h: &mut Headless| h.request("ui.widgets", json!({}), t).to_string();
+        h.request("engine.execute", json!({"command": "library.select", "params": {"ids": [id.0]}}), t);
+        h.request("ui.set", json!({"view": "detail"}), t);
+        h.app.ui.open_sections = vec!["detail".to_string()];
+        h.settle(SETTLE);
+        h.step();
+        h.step();
+        let w = widgets(&mut h);
+        assert!(w.contains("\"denoise:setup\""), "a raw photo with no model is offered the setup: {w}");
+        // One click lands in Settings, with local installation available even without a download offer.
+        let r = h.request("ui.clickWidget", json!({"id": "denoise:setup"}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        h.step();
+        h.step();
+        assert_eq!(h.app.ui.dialog, Some(Dialog::Settings { tab: "denoise".into() }));
+        h.settle(SETTLE);
+        let listed = h.app.session.execute("denoise.models.list", &json!({})).unwrap();
+        assert_eq!(listed["models"].as_array().unwrap().len(), lightcraft_denoise::known::all().len(), "{listed}");
+        assert!(widgets(&mut h).contains("\"denoise:installFile\""));
+        h.app.ui.dialog = None;
+        // a photo that is not raw: no offer
+        h.request(
+            "engine.execute",
+            json!({"command": "library.select", "params": {"ids": [h.app.session.catalog.photos().find(|p| p.id != id).unwrap().id.0]}}),
+            t,
+        );
+        h.settle(SETTLE);
+        h.step();
+        h.step();
+        assert!(!widgets(&mut h).contains("\"denoise:setup\""), "nothing is offered for a photo denoise does not apply to");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     /// Generous: renders are slow when the machine is loaded (parallel builds), and a timed-out

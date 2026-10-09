@@ -205,6 +205,7 @@ fn services(originals: Originals, backend: Option<Backend>, files: Files, frozen
             open_picker(originals.clone(), backend.clone(), ctx.clone());
             Vec::new() // files arrive asynchronously and are imported on a later frame
         })),
+        pick_denoise_model: None,
         // Preset files: browser pickers are asynchronous; not wired on the web yet.
         pick_preset_files: None,
         pick_tracklog: None,

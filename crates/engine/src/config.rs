@@ -1,4 +1,4 @@
-//! Where LightCraft keeps per-user data on this machine: the config folder (app settings, face models).
+//! Where LightCraft keeps per-user data on this machine: the config folder (app settings, face and denoise models).
 //!
 //! Hosts that have a file system (the desktop app, the CLI, the MCP server) share these defaults so a model
 //! installed from one is there for the others. Nothing here is applied automatically: a [`Session`] has no
@@ -33,5 +33,24 @@ impl Session {
     pub fn with_default_face_models(mut self) -> Self {
         self.face_models_dir = default_face_models_dir();
         self
+    }
+}
+
+pub fn default_denoise_models_dir() -> Option<PathBuf> {
+    std::env::var_os("LIGHTCRAFT_DENOISE_MODELS")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::camera_profiles::config_dir().map(|d| d.join("denoise-models")))
+}
+
+impl Session {
+    pub fn with_default_denoise_models(mut self) -> Self {
+        self.set_denoise_models_dir(default_denoise_models_dir());
+        self
+    }
+
+    pub fn set_denoise_models_dir(&mut self, dir: Option<PathBuf>) {
+        self.denoise.models_dir = dir;
+        self.denoise.touch();
     }
 }

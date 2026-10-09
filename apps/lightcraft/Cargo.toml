@@ -10,7 +10,9 @@ default-run = "lightcraft"
 workspace = true
 
 [features]
-default = []
+default = ["denoise"]
+denoise = ["lightcraft-engine/denoise"]
+rawnind-model = ["denoise", "lightcraft-engine/rawnind-model"]
 
 [dependencies]
 lightcraft-engine = { workspace = true, features = ["sam"] }

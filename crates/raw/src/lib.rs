@@ -678,14 +678,27 @@ impl RawImage {
     /// The result is camera RGB (not white balanced), white level = 1.0, not oriented.
     pub fn develop(&self, method: Method) -> Result<Rgb32f> {
         let n = self.normalized()?;
-        let mut rgb = demosaic(&n, method);
+        let rgb = demosaic(&n, method);
         drop(n);
+        Ok(self.finish_demosaiced(rgb))
+    }
+
+    /// The last steps of [`Self::develop`] for camera RGB made some other way (a denoiser that demosaics too) from
+    /// [`Self::normalized`]'s mosaic: apply `OpcodeList3`, then the default crop.
+    pub fn finish_demosaiced(&self, mut rgb: Rgb32f) -> Rgb32f {
         opcodes::apply_list3(&self.opcodes.list3, &mut rgb);
-        let c = self.crop.clipped(rgb.width, rgb.height);
-        if c.width == 0 || c.height == 0 || (c.x == 0 && c.y == 0 && c.width == rgb.width && c.height == rgb.height) {
-            return Ok(rgb);
+        let c = self.develop_crop(rgb.width, rgb.height);
+        if c.x == 0 && c.y == 0 && c.width == rgb.width && c.height == rgb.height {
+            return rgb;
         }
-        Ok(rgb.into_crop(c.x, c.y, c.width, c.height))
+        rgb.into_crop(c.x, c.y, c.width, c.height)
+    }
+
+    /// The part of a `width × height` demosaiced picture (the active area) that [`Self::develop`] keeps: the default
+    /// crop, or all of it when there is none.
+    pub fn develop_crop(&self, width: usize, height: usize) -> Rect {
+        let c = self.crop.clipped(width, height);
+        if c.width == 0 || c.height == 0 { Rect::new(0, 0, width, height) } else { c }
     }
 }
 
@@ -716,6 +729,43 @@ mod tests {
                 assert_eq!(g, 5);
             }
         }
+    }
+
+    #[test]
+    fn a_picture_made_elsewhere_is_finished_like_develop_does() {
+        let (w, h) = (12usize, 10usize);
+        let raw = RawImage {
+            format: RawFormat::Dng,
+            width: w,
+            height: h,
+            cpp: 1,
+            data: RawData::U16((0..w * h).map(|i| (100 + (i * 37) % 900) as u16).collect()),
+            cfa: Cfa::bayer("RGGB"),
+            bits: 12,
+            black: BlackLevel::uniform(64.0),
+            white: vec![1023.0],
+            active_area: Rect::new(2, 2, 8, 6),
+            crop: Rect::new(1, 1, 5, 4),
+            orientation: Orientation::Normal,
+            color: ColorData::default(),
+            wb_multipliers: None,
+            linearized: false,
+            opcodes: OpcodeLists::default(),
+            metadata: Metadata::default(),
+        };
+        let direct = raw.develop(Method::Bilinear).unwrap();
+        let by_hand = raw.finish_demosaiced(demosaic(&raw.normalized().unwrap(), Method::Bilinear));
+        assert_eq!((direct.width, direct.height), (5, 4));
+        assert_eq!(direct, by_hand);
+        // the crop is what develop keeps; no usable crop keeps everything
+        assert_eq!(raw.develop_crop(8, 6), Rect::new(1, 1, 5, 4));
+        let mut whole = raw.clone();
+        whole.crop = Rect::default();
+        assert_eq!(whole.develop_crop(8, 6), Rect::new(0, 0, 8, 6));
+        assert_eq!(whole.develop(Method::Bilinear).unwrap().width, 8);
+        // a crop that pokes out is clipped to the picture
+        whole.crop = Rect::new(6, 4, 10, 10);
+        assert_eq!(whole.develop_crop(8, 6), Rect::new(6, 4, 2, 2));
     }
 
     #[test]

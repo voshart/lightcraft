@@ -577,6 +577,10 @@ pub enum Dialog {
         info: serde_json::Value,
         accepted: bool,
     },
+    DenoiseModel {
+        info: serde_json::Value,
+        accepted: bool,
+    },
     SystemInfo {
         rows: Vec<(String, String)>,
     },

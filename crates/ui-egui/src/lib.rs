@@ -19,6 +19,7 @@ pub mod menu_level;
 pub mod menubar;
 pub mod menus;
 pub mod merge;
+mod model_setup;
 pub mod panels;
 pub mod pick;
 pub mod region;
@@ -108,6 +109,8 @@ pub struct Services {
     pub pick_files: Option<PickFiles>,
     /// Open dialog for a face model (`.onnx`; Settings ▸ Faces ▸ Add a model file…).
     pub pick_model_file: Option<PickFiles>,
+    /// Local ONNX model; a manifest must accompany it.
+    pub pick_denoise_model: Option<PickFiles>,
     /// Open dialog for preset files (`.lcpreset`, `.xmp`, `.lrtemplate`, `.zip`, `.dng`, Luminar `.lmp` / `.mplumpack`).
     pub pick_preset_files: Option<PickFiles>,
     /// Open dialog for a GPS track log (`.gpx`; Photo ▸ Auto-Tag from Tracklog…).
@@ -159,6 +162,7 @@ pub struct Perf {
 }
 
 pub struct LightcraftApp {
+    pub(crate) model_setup: model_setup::Pending,
     /// Per-catalog-revision caches of library-wide results the panels show every frame
     /// (expensive on big libraries).
     pub caches: Caches,
@@ -314,6 +318,7 @@ impl LightcraftApp {
             gpu_applied: None,
             memory_applied: None,
             library_problem: None,
+            model_setup: Default::default(),
         }
     }
 
@@ -326,6 +331,9 @@ impl LightcraftApp {
 
     /// Run a UI or engine command by id. The single entry point for every frontend path.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        if let Some(result) = model_setup::intercept(self, id, &params) {
+            return result;
+        }
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
         }
@@ -763,6 +771,8 @@ impl LightcraftApp {
         }
         self.session.persist_if_dirty();
         panels::faces::pump(self, ctx);
+        panels::denoise::pump(self, ctx);
+        model_setup::pump(self, ctx);
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
         if self.fonts_ready {
@@ -1073,6 +1083,8 @@ pub struct Caches {
     /// The most photos the face scan has had left at once since it last finished (the progress bar's whole).
     pub faces_peak: u64,
     person_names: Option<(u64, std::sync::Arc<Vec<String>>)>,
+    /// AI denoise: what the pump last saw, the model list and the downloads being watched.
+    pub denoise: panels::denoise::Ui,
     /// The grid's date runs, layout and indexes (by the visible list's generation).
     pub grid: panels::grid::GridCache,
     /// What the grid did on its frames (benchmarks and tests check unchanged frames stay cheap).
@@ -1309,3 +1321,6 @@ mod cache_tests {
         assert_eq!(c.album_count_scans, 1);
     }
 }
+
+#[cfg(test)]
+mod tests_model_setup;

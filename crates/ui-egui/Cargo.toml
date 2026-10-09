@@ -25,6 +25,7 @@ serde_json = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+lightcraft-denoise = { workspace = true, features = ["runtime"] }
 lightcraft-codecs = { workspace = true }
 lightcraft-faces = { workspace = true }
 

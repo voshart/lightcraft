@@ -915,6 +915,14 @@ pub struct LensBlur {
 #[serde(default)]
 pub struct Enhance {
     pub denoise: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denoise_on: Option<bool>,
     pub raw_details: bool,
     pub super_resolution: bool,
+}
+
+impl Enhance {
+    pub fn denoise_enabled(&self) -> bool {
+        self.denoise_on.unwrap_or(self.denoise > 0.0)
+    }
 }

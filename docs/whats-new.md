@@ -2,6 +2,10 @@
 
 ## October 2026
 
+### AI RAW denoise
+- Detail has a per-photo AI Denoise switch and Amount. Bayer RAW photos use a disposable cache, with matching previews and exports and pure-Rust CPU/GPU inference.
+- Models are installed separately after accepting their terms; no weights are bundled. See [setup and limitations](denoise.md).
+
 ### Library keyboard culling
 - Colour labels tint thumbnail surrounds in Square Grid and the Detail filmstrip, and a translucent footer along the bottom of the photo in Photo Grid. Label confirmations use a matching pale colour.
 - Setting or clearing a colour label shows a brief bottom confirmation, like rating a photo; custom label names appear in the message too.
